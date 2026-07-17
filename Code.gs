@@ -92,6 +92,11 @@ function processSelection(selectionData) {
     if (userRowIndex === -1) { return { success: false, message: "User not found." }; }
     const userStatus = turnData[userRowIndex][statusIndex];
     if (!['Active', 'Standby', 'Backup'].includes(userStatus)) { return { success: false, message: "It is not your turn to make a selection." }; }
+
+    if (currentRound === 1 && selectionData.week2) {
+        return { success: false, message: "Invalid selection. You can only select exactly ONE week during Round 1." };
+    }
+
     if (selectionData.week1 && selectionData.week2) {
       const week1Info = weekData.find(row => row[0].getTime() == selectionData.week1);
       const week2Info = weekData.find(row => row[0].getTime() == selectionData.week2);
