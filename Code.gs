@@ -304,8 +304,8 @@ function processSelection(selectionData) {
     if (!schemaCheck.valid) { return { success: false, message: "System setup error: " + schemaCheck.message }; }
 
     // Check if system is completely full
-    const weekData = weekSheet.getDataRange().getValues();
-    weekData.shift(); // remove header
+    const weekDataRaw = weekSheet.getDataRange().getValues();
+    const weekData = weekDataRaw.slice(1);
     let totalSpotsRemaining = 0;
     weekData.forEach(row => {
         let empty = 0;
@@ -316,8 +316,8 @@ function processSelection(selectionData) {
         return { success: false, message: "Selection Complete: All available vacation slots are filled." };
     }
 
-    const turnHeaders = turnDataRaw.shift();
-    const turnData = turnDataRaw;
+    const turnHeaders = turnDataRaw[0];
+    const turnData = turnDataRaw.slice(1);
 
     const nameIdx = turnHeaders.indexOf('Name');
     const statusIdx = turnHeaders.indexOf('Status');
@@ -360,6 +360,18 @@ function processSelection(selectionData) {
     let w1Data = weekData[w1Index];
     let w2Data = selectionData.week2 ? weekData[w2Index] : null;
 
+    // Validate classifications tightly on the backend before making any writes
+    const class1 = normalizeClassification(w1Data[1]);
+    const class2 = w2Data ? normalizeClassification(w2Data[1]) : null;
+
+    if (!class1 || (w2Data && !class2)) {
+        return { success: false, message: "Selected week has an invalid classification." };
+    }
+
+    if (w2Data && (class1 !== "Non-Prime" || class2 !== "Non-Prime")) {
+        return { success: false, message: "Two-week selections must both be Non-Prime." };
+    }
+
     // Check max capacity and existing spots
     let w1EmptySlots = 0;
     for (let i=2; i<=5; i++) { if (!w1Data[i]) w1EmptySlots++; }
@@ -375,12 +387,6 @@ function processSelection(selectionData) {
     for(let i=2; i<=5; i++){
         if (w1Data[i] === selectionData.name) return { success: false, message: "You are already booked for the primary week." };
         if (w2Data && w2Data[i] === selectionData.name) return { success: false, message: "You are already booked for the secondary week." };
-    }
-
-    if (selectionData.week2) {
-        if (normalizeClassification(w1Data[1]) === 'Prime' || normalizeClassification(w2Data[1]) === 'Prime') {
-            return { success: false, message: "Invalid selection. You cannot include a Prime week when selecting two weeks." };
-        }
     }
 
     // If validation passes, apply changes atomically.
@@ -600,4 +606,111 @@ function testInvalidClassification() {
 function runMoreTests() {
   testRound1SelectableWeeks();
   testInvalidClassification();
+}
+
+// ============================================================================
+// INTEGRATION TESTS
+// ============================================================================
+
+function setupMockSpreadsheet() {
+    // We create a temporary spreadsheet for true end-to-end testing
+    const ss = SpreadsheetApp.create('Temp Test SS - Vacation Selection');
+
+    const turnSheet = ss.insertSheet('Turn Management');
+    turnSheet.appendRow(['Name', 'PIN', 'SeniorityPosition', 'Status', 'WeeksSelected', 'LotteryPosition', 'SkipNextTurn']);
+    turnSheet.appendRow(['Person1', '1234', 1, 'Waiting', 0, 1, false]);
+    turnSheet.appendRow(['Person2', '1234', 2, 'Waiting', 0, 2, false]);
+    turnSheet.appendRow(['Person3', '1234', 3, 'Waiting', 0, 3, false]);
+    turnSheet.appendRow(['Person4', '1234', 4, 'Waiting', 0, 4, false]);
+    turnSheet.appendRow(['Person5', '1234', 5, 'Waiting', 0, 5, false]);
+
+    const weekSheet = ss.insertSheet('Week Availability');
+    weekSheet.appendRow(['StartDate', 'Classification', 'P1', 'P2', 'P3', 'P4', 'SpotsRemaining']);
+    weekSheet.appendRow([new Date('2026-06-01'), 'Prime', '', '', '', '', 4]);
+    weekSheet.appendRow([new Date('2026-10-05'), 'Non-Prime', '', '', '', '', 4]);
+    weekSheet.appendRow([new Date('2026-11-02'), 'Non-Prime', '', '', '', '', 4]);
+    weekSheet.appendRow([new Date('2026-12-07'), 'UnknownType', '', '', '', '', 4]);
+
+    const configSheet = ss.insertSheet('Config');
+    configSheet.getRange('A2').setValue('CurrentRound');
+    configSheet.getRange('B2').setValue(1);
+
+    // Delete the default 'Sheet1'
+    const sheet1 = ss.getSheetByName('Sheet1');
+    if (sheet1) ss.deleteSheet(sheet1);
+
+    return ss;
+}
+
+function runIntegrationTests() {
+    console.log("Running Integration Tests...");
+
+    let ss;
+    try {
+        ss = setupMockSpreadsheet();
+        // Temporarily override SpreadsheetApp.getActiveSpreadsheet to return our temp sheet
+        const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
+        SpreadsheetApp.getActiveSpreadsheet = () => ss;
+
+        try {
+            // TEST 1: Person 4 rejected initially
+            let res = processSelection({ name: 'Person4', week1: ss.getSheetByName('Week Availability').getRange(2, 1).getValue().getTime() });
+            if (res.success) throw new Error("Person 4 should have been rejected (outside window).");
+            console.log("PASS: Person 4 rejected initially.");
+
+            // TEST 2: Person 2 can select while Person 1 unfinished
+            let weekTime2 = ss.getSheetByName('Week Availability').getRange(3, 1).getValue().getTime();
+            res = processSelection({ name: 'Person2', week1: weekTime2 });
+            if (!res.success) throw new Error("Person 2 should succeed.");
+            console.log("PASS: Person 2 selected while Person 1 is unfinished.");
+
+            // TEST 3: Person 4 STILL rejected
+            res = processSelection({ name: 'Person4', week1: ss.getSheetByName('Week Availability').getRange(2, 1).getValue().getTime() });
+            if (res.success) throw new Error("Person 4 should STILL be rejected (window anchored at Person 1).");
+            console.log("PASS: Person 4 remains rejected because window is 1, 3, 4 (2 is completed). Wait... 1, 3, 4 is the window? No. 1, 2, 3 is the original window. 2 is completed. The permitted window consists of the anchor and the next TWO positions. So anchor=1, offset=0 (1), offset=1 (2-completed), offset=2 (3). So Person 4 is still offset 3, thus outside the window!");
+
+            // TEST 4: Person 1 submits
+            res = processSelection({ name: 'Person1', week1: ss.getSheetByName('Week Availability').getRange(2, 1).getValue().getTime() });
+            if (!res.success) throw new Error("Person 1 should succeed.");
+            console.log("PASS: Person 1 selected. Anchor should move to 3.");
+
+            // TEST 5: Person 4 now accepted (Anchor=3, window=3,4,5)
+            res = processSelection({ name: 'Person4', week1: ss.getSheetByName('Week Availability').getRange(2, 1).getValue().getTime() });
+            if (!res.success) throw new Error("Person 4 should succeed now that anchor moved to 3.");
+            console.log("PASS: Person 4 accepted in new window.");
+
+            // TEST 6: Invalid Classification Request Rejected
+            let invalidTime = ss.getSheetByName('Week Availability').getRange(5, 1).getValue().getTime();
+            res = processSelection({ name: 'Person3', week1: invalidTime });
+            if (res.success) throw new Error("Person 3 selecting invalid classification should fail.");
+            console.log("PASS: Invalid classification rejected.");
+
+            // TEST 7: Descending Lottery Round
+            ss.getSheetByName('Config').getRange('B2').setValue(3); // Round 3 is descending
+            // Reset statuses to Waiting
+            let turnSheet = ss.getSheetByName('Turn Management');
+            for(let i=2; i<=6; i++) turnSheet.getRange(i, 4).setValue('Waiting');
+
+            // Queue should be: Person5 (anchor), Person4, Person3, Person2, Person1
+            // Person 2 should fail initially
+            res = processSelection({ name: 'Person2', week1: weekTime2 });
+            if (res.success) throw new Error("Person 2 should be rejected in descending round 3 (window is 5,4,3).");
+            console.log("PASS: Descending round window calculation correct.");
+
+        } finally {
+            // Restore SpreadsheetApp
+            SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
+        }
+    } catch(e) {
+        console.error("Integration test failed:", e.message);
+        throw e;
+    } finally {
+        if (ss) {
+            // Clean up temporary spreadsheet
+            const files = DriveApp.getFilesByName(ss.getName());
+            while (files.hasNext()) {
+                files.next().setTrashed(true);
+            }
+        }
+    }
 }

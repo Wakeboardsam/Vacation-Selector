@@ -1,8 +1,0 @@
-127.0.0.1 - - [17/Jul/2026 20:45:13] "GET /mock_index.html HTTP/1.1" 200 -
-127.0.0.1 - - [17/Jul/2026 20:45:13] "GET /Index.html HTTP/1.1" 200 -
-127.0.0.1 - - [17/Jul/2026 20:46:21] "GET /mock_index.html HTTP/1.1" 200 -
-127.0.0.1 - - [17/Jul/2026 20:46:21] "GET /Index.html HTTP/1.1" 200 -
-127.0.0.1 - - [17/Jul/2026 20:47:23] "GET /mock_index.html HTTP/1.1" 200 -
-127.0.0.1 - - [17/Jul/2026 20:47:23] "GET /Index.html HTTP/1.1" 200 -
-127.0.0.1 - - [17/Jul/2026 20:48:39] "GET /mock_index.html HTTP/1.1" 200 -
-127.0.0.1 - - [17/Jul/2026 20:48:39] "GET /Index.html HTTP/1.1" 200 -
