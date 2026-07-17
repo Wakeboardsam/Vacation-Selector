@@ -415,7 +415,7 @@
         formHTML += `<label for="week1">Primary Week Selection:</label><select id="week1" style="width:100%" onchange="handleWeek1Change(this, ${currentRound})"><option selected disabled>-- Choose a week --</option><optgroup label="Prime Weeks">${primeWeeks.map(w => `<option value="${w.valueDate}" data-type="Prime">${w.displayDate} (${w.spotsRemaining} spots left)</option>`).join('')}</optgroup><optgroup label="Non-Prime Weeks">${nonPrimeWeeks.map(w => `<option value="${w.valueDate}" data-type="Non-Prime">${w.displayDate} (${w.spotsRemaining} spots left)</option>`).join('')}</optgroup></select>`;
 
         if (currentRound !== 1) {
-            formHTML += `<label for="week2">Additional Non-Prime Week (optional):</label><select id="week2" style="width:100%"><option value="" selected>-- No second week --</option>${nonPrimeWeeks.map(w => `<option value="${w.valueDate}">${w.displayDate} (${w.spotsRemaining} spots left)</option>`).join('')}</select>`;
+            formHTML += `<label for="week2">Additional Non-Prime Week (optional):</label><select id="week2" style="width:100%" onchange="handleWeek2Change()"><option value="" selected>-- No second week --</option>${nonPrimeWeeks.map(w => `<option value="${w.valueDate}">${w.displayDate} (${w.spotsRemaining} spots left)</option>`).join('')}</select>`;
             formHTML += `<p id="week2-warning" style="color: #854d0e; font-size: 0.9em; display: none;"><i>Warning: Choosing a second non-prime week will forfeit your next scheduled turn.</i></p>`;
         }
 
@@ -436,9 +436,24 @@
               warningText.style.display = 'none';
           } else {
               week2Select.disabled = false;
-              warningText.style.display = 'block';
+              if (week2Select.value !== "") {
+                  warningText.style.display = 'block';
+              } else {
+                  warningText.style.display = 'none';
+              }
           }
       }
+
+      function handleWeek2Change() {
+          const week2Select = document.getElementById('week2');
+          const warningText = document.getElementById('week2-warning');
+          if (week2Select.value !== "") {
+              warningText.style.display = 'block';
+          } else {
+              warningText.style.display = 'none';
+          }
+      }
+
       function submitSelection() {
         const week1 = document.getElementById("week1").value;
         const week2Element = document.getElementById("week2");

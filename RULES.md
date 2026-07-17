@@ -1,11 +1,12 @@
 # Vacation Selection Rules
 
-## Setup & Schema Requirements
-The `Turn Management` sheet MUST contain the following exact columns:
-`Name | PIN | SeniorityPosition | Status | WeeksSelected | LotteryPosition | SkipNextTurn`
-*   `SeniorityPosition`: Used in Round 1 strictly from top to bottom.
-*   `LotteryPosition`: Used in Round 2 and beyond, maintaining a strict alternating snake order. Cannot be empty or duplicate.
-*   The script includes a `setupSpreadsheetSchema()` function to safely initialize these columns from the legacy setup without overwriting data.
+## Setup & Administrator Steps
+1. **Merge/Deploy:** Merge the PR and deploy the Google Apps Script code.
+2. **Schema Migration:** Run the `setupSpreadsheetSchema()` function from the Google Apps Script editor. This safely migrates the old `QueuePosition` to `SeniorityPosition` and adds `LotteryPosition` and `SkipNextTurn` columns.
+3. **Verify Seniority:** Confirm the `SeniorityPosition` column is correct for Round 1 (1 to 21).
+4. **Lottery Setup:** Enter one unique `LotteryPosition` for every participant in the spreadsheet.
+5. **Initialize Lottery Round:** After Round 1 (the seniority round) is fully complete for all participants, an administrator MUST run `initializeLotteryRound()` from the Apps Script editor. This will advance the round to 2 and setup the new Active window.
+6. **Confirm Window:** Confirm that Round 2 has `Active`, `Standby`, and `Backup` statuses assigned.
 
 ## Selection Order
 * **Round 1 (Seniority Round):** Participants select exactly one week in seniority order.
