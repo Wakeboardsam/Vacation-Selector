@@ -27,6 +27,6 @@ jobs:
       - name: Push to Apps Script
         # The -f flag forces the push, overwriting the script editor
         run: clasp push -f
-        
+
       - name: Update Live Deployment
         run: clasp deploy -i AKfycbz9SsDZKs2szcko7QvHk60kaYzqs5KExydh3bgsjuQuWFIfKlC0_Dtuk86Yiz9R0Nxa

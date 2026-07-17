@@ -2,26 +2,199 @@
 <html>
   <head>
     <base target="_top">
-    <style> 
-      body { font-family: Arial, sans-serif; background-color: #f0f2f5; margin: 0; }
-      .container { max-width: 1200px; margin: 20px auto; background-color: white; padding: 2rem; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
-      nav { background-color: #333; padding: 1rem; text-align: center; }
-      nav a { color: white; text-decoration: none; font-size: 1.2rem; margin: 0 15px; cursor: pointer; }
-      h1, h2, h3 { color: #333; }
-      select, input, button { padding: 10px; margin: 10px 0; border-radius: 5px; border: 1px solid #ccc; box-sizing: border-box; }
-      button { background-color: #007bff; color: white; cursor: pointer; border: none; font-size: 1rem; }
-      table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-      th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-      th { background-color: #f2f2f2; }
-      .prime { background-color: #fffbe0; }
-      .full { background-color: #ffebee; }
-      .highlight-pick { background-color: #e0f7fa !important; font-weight: bold; }
-      ul.status-list { list-style-type: none; padding: 0; }
-      ul.status-list li { margin: 5px 0; }
-      #public-container { display: flex; gap: 20px; }
-      #public-status-container { flex: 1; }
-      #public-calendar-container { flex: 3; }
-      #login-container, #dashboard-container { display: none; }
+    <style>
+      :root {
+        --primary-color: #3b82f6; /* Tailwind blue-500 */
+        --primary-hover: #2563eb; /* Tailwind blue-600 */
+        --bg-color: #f3f4f6; /* Tailwind gray-100 */
+        --card-bg: #ffffff;
+        --text-color: #1f2937; /* Tailwind gray-800 */
+        --text-light: #6b7280; /* Tailwind gray-500 */
+        --border-color: #e5e7eb; /* Tailwind gray-200 */
+        --prime-bg: #fef3c7; /* Tailwind amber-100 */
+        --prime-text: #92400e; /* Tailwind amber-800 */
+        --full-bg: #fee2e2; /* Tailwind red-100 */
+        --full-text: #b91c1c; /* Tailwind red-700 */
+        --highlight-bg: #dbeafe; /* Tailwind blue-100 */
+        --active-bg: #dcfce7; /* Tailwind green-100 */
+        --active-text: #166534; /* Tailwind green-800 */
+        --standby-bg: #fef08a; /* Tailwind yellow-200 */
+        --standby-text: #854d0e; /* Tailwind yellow-800 */
+      }
+
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        background-color: var(--bg-color);
+        color: var(--text-color);
+        margin: 0;
+        line-height: 1.5;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      .container {
+        max-width: 1200px;
+        margin: 2rem auto;
+        background-color: var(--card-bg);
+        padding: 2rem;
+        border-radius: 0.5rem;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+      }
+
+      nav {
+        background-color: #111827; /* Tailwind gray-900 */
+        padding: 1rem;
+        text-align: center;
+        display: flex;
+        justify-content: center;
+        gap: 1rem;
+        flex-wrap: wrap;
+      }
+
+      nav a {
+        color: #e5e7eb;
+        text-decoration: none;
+        font-size: 1.125rem;
+        font-weight: 500;
+        padding: 0.5rem 1rem;
+        border-radius: 0.375rem;
+        transition: background-color 0.2s, color 0.2s;
+        cursor: pointer;
+      }
+
+      nav a:hover {
+        background-color: #374151; /* Tailwind gray-700 */
+        color: #ffffff;
+      }
+
+      h1, h2, h3 {
+        color: var(--text-color);
+        margin-top: 0;
+        font-weight: 600;
+      }
+
+      h1 { font-size: 2.25rem; margin-bottom: 1.5rem; text-align: center; }
+      h2 { font-size: 1.5rem; margin-bottom: 1rem; border-bottom: 2px solid var(--border-color); padding-bottom: 0.5rem; }
+      h3 { font-size: 1.25rem; margin-bottom: 0.75rem; }
+
+      select, input, button {
+        width: 100%;
+        padding: 0.75rem 1rem;
+        margin: 0.5rem 0 1.25rem 0;
+        border-radius: 0.375rem;
+        border: 1px solid var(--border-color);
+        background-color: #f9fafb; /* Tailwind gray-50 */
+        font-size: 1rem;
+        color: var(--text-color);
+        box-sizing: border-box;
+        transition: border-color 0.2s, box-shadow 0.2s;
+      }
+
+      select:focus, input:focus {
+        outline: none;
+        border-color: var(--primary-color);
+        box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
+        background-color: #ffffff;
+      }
+
+      button {
+        background-color: var(--primary-color);
+        color: white;
+        cursor: pointer;
+        border: none;
+        font-weight: 500;
+        transition: background-color 0.2s;
+      }
+
+      button:hover {
+        background-color: var(--primary-hover);
+      }
+
+      button:disabled {
+        background-color: #9ca3af; /* Tailwind gray-400 */
+        cursor: not-allowed;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: separate;
+        border-spacing: 0;
+        margin-top: 1rem;
+        border: 1px solid var(--border-color);
+        border-radius: 0.5rem;
+        overflow: hidden;
+      }
+
+      th, td {
+        border-bottom: 1px solid var(--border-color);
+        padding: 0.75rem 1rem;
+        text-align: left;
+      }
+
+      th {
+        background-color: #f9fafb; /* Tailwind gray-50 */
+        font-weight: 600;
+        color: var(--text-light);
+        text-transform: uppercase;
+        font-size: 0.75rem;
+        letter-spacing: 0.05em;
+      }
+
+      tbody tr:last-child td {
+        border-bottom: none;
+      }
+
+      tbody tr:hover {
+        background-color: #f9fafb;
+      }
+
+      .prime { background-color: var(--prime-bg) !important; color: var(--prime-text); }
+      .full { background-color: var(--full-bg) !important; color: var(--full-text); text-decoration: line-through; }
+      .highlight-pick { background-color: var(--highlight-bg) !important; font-weight: bold; color: var(--primary-hover); }
+
+      ul.status-list {
+        list-style-type: none;
+        padding: 0;
+        margin: 0;
+      }
+
+      ul.status-list li {
+        margin: 0.5rem 0;
+        padding: 0.5rem;
+        background-color: #f9fafb;
+        border: 1px solid var(--border-color);
+        border-radius: 0.25rem;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+
+      #public-container { display: flex; gap: 2rem; flex-wrap: wrap; }
+      #public-status-container { flex: 1; min-width: 250px; }
+      #public-calendar-container { flex: 3; min-width: 300px; }
+
+      /* Make table scrollable on small screens */
+      .table-wrapper {
+          overflow-x: auto;
+          width: 100%;
+      }
+
+      #login-container { max-width: 400px; }
+      #dashboard-container { display: none; }
+
+      #login-container h1 { font-size: 1.75rem; }
+
+      #status { color: #dc2626; /* Tailwind red-600 */ font-weight: 500; text-align: center; }
+
+      .status-badge {
+        display: inline-block;
+        padding: 0.25rem 0.5rem;
+        border-radius: 9999px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        text-transform: uppercase;
+      }
+      .badge-prime { background-color: var(--prime-bg); color: var(--prime-text); }
+      .badge-nonprime { background-color: #e5e7eb; color: var(--text-color); }
     </style>
   </head>
   <body>
@@ -41,10 +214,12 @@
             <label for="name-highlighter">Highlight selections:</label>
             <select id="name-highlighter" onchange="highlightName(this)"><option value="">-- Show All --</option></select>
           </div>
-          <table id="calendar-table">
-            <thead><tr><th>Week Of</th><th>Type</th><th>Person 1</th><th>Person 2</th><th>Person 3</th><th>Person 4</th><th>Status</th></tr></thead>
-            <tbody></tbody>
-          </table>
+          <div class="table-wrapper">
+            <table id="calendar-table">
+              <thead><tr><th>Week Of</th><th>Type</th><th>Person 1</th><th>Person 2</th><th>Person 3</th><th>Person 4</th><th>Status</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
         </div>
       </div>
     </div>
@@ -76,14 +251,41 @@
       function displayPublicCalendar(data) {
         const statusDiv = document.getElementById("public-status-container");
         let statusHtml = '<ul class="status-list">';
-        const activeUsers = data.turnQueue.filter(p => ['Active', 'Standby', 'Backup'].includes(p.status)).sort((a,b)=>a.queuePosition-b.queuePosition);
-        const nextUpUsers = data.turnQueue.filter(p => p.status === 'Waiting').sort((a,b)=>a.queuePosition-b.queuePosition).slice(0, 10);
-        statusHtml += `<li><b>Current Window:</b></li>`;
-        activeUsers.forEach(p => { statusHtml += `<li>${p.status === 'Active' ? '🟢' : '🟡'} ${p.name} (#${p.queuePosition})</li>`; });
-        statusHtml += `<li style="margin-top:10px;"><b>Next Up:</b></li>`;
-        nextUpUsers.forEach(p => { statusHtml += `<li>${p.name} (#${p.queuePosition})</li>`; });
-        statusHtml += `</ul>`;
-        statusDiv.innerHTML += statusHtml;
+
+        let allFull = true;
+        data.calendarData.forEach(w => {
+           if (w.spotsRemaining > 0) allFull = false;
+        });
+
+        if (allFull || data.calendarData.length === 0) {
+            statusDiv.innerHTML = `<h2>Current Status</h2><p><b>Selection Complete:</b> All available vacation slots have been filled.</p>`;
+        } else {
+            let activeUsers = data.turnQueue.filter(p => ['Active', 'Standby', 'Backup'].includes(p.status));
+            let nextUpUsers = data.turnQueue.filter(p => p.status === 'Waiting');
+
+            if (data.currentRound === 1) {
+                activeUsers.sort((a,b) => a.queuePosition - b.queuePosition);
+                nextUpUsers.sort((a,b) => a.queuePosition - b.queuePosition);
+            } else {
+                const isEvenRound = data.currentRound % 2 === 0;
+                if (isEvenRound) {
+                    activeUsers.sort((a,b) => a.queuePosition - b.queuePosition);
+                    nextUpUsers.sort((a,b) => a.queuePosition - b.queuePosition);
+                } else {
+                    activeUsers.sort((a,b) => b.queuePosition - a.queuePosition);
+                    nextUpUsers.sort((a,b) => b.queuePosition - a.queuePosition);
+                }
+            }
+
+            nextUpUsers = nextUpUsers.slice(0, 10);
+
+            statusHtml += `<li><b>Current Window (Round ${data.currentRound}):</b></li>`;
+            activeUsers.forEach(p => { statusHtml += `<li>${p.status === 'Active' ? '🟢' : '🟡'} ${p.name} (#${p.queuePosition})</li>`; });
+            statusHtml += `<li style="margin-top:10px;"><b>Next Up:</b></li>`;
+            nextUpUsers.forEach(p => { statusHtml += `<li>${p.name} (#${p.queuePosition})</li>`; });
+            statusHtml += `</ul>`;
+            statusDiv.innerHTML += statusHtml;
+        }
 
         const tbody = document.querySelector("#calendar-table tbody");
         tbody.innerHTML = '';
@@ -150,49 +352,112 @@
 
       function displayDashboard(data) {
         const container = document.getElementById('dashboard-container');
+
+        let allFull = true;
+        data.availableWeeks.forEach(w => {
+           if (w.spotsRemaining > 0) allFull = false;
+        });
+
+        if (allFull || data.availableWeeks.length === 0) {
+            container.innerHTML = `<div id="dashboard-content"><h2>Welcome, ${data.currentUser.name}</h2><h3>Selection Complete</h3><p>All vacation slots have been filled. The process is now complete.</p></div>`;
+            return;
+        }
+
         let html = `<div id="dashboard-content"><h2>Welcome, ${data.currentUser.name}</h2><h3>Current Status</h3><ul class="status-list" style="list-style-type:none;padding:0;">`;
-        const activeUsers = data.turnQueue.filter(p => ['Active', 'Standby', 'Backup'].includes(p.status)).sort((a,b)=>a.queuePosition-b.queuePosition);
-        const nextUpUsers = data.turnQueue.filter(p => p.status === 'Waiting').sort((a,b)=>a.queuePosition-b.queuePosition).slice(0, 10);
+
+        let activeUsers = data.turnQueue.filter(p => ['Active', 'Standby', 'Backup'].includes(p.status));
+        let nextUpUsers = data.turnQueue.filter(p => p.status === 'Waiting');
+
+        // Sort identically to backend logic
+        if (data.currentRound === 1) {
+            activeUsers.sort((a,b) => a.queuePosition - b.queuePosition);
+            nextUpUsers.sort((a,b) => a.queuePosition - b.queuePosition);
+        } else {
+            const isEvenRound = data.currentRound % 2 === 0;
+            if (isEvenRound) {
+                activeUsers.sort((a,b) => a.queuePosition - b.queuePosition);
+                nextUpUsers.sort((a,b) => a.queuePosition - b.queuePosition);
+            } else {
+                activeUsers.sort((a,b) => b.queuePosition - a.queuePosition);
+                nextUpUsers.sort((a,b) => b.queuePosition - a.queuePosition);
+            }
+        }
+
+        nextUpUsers = nextUpUsers.slice(0, 10);
+
         html += `<li><b>Current Window (Round ${data.currentRound}):</b></li>`;
         activeUsers.forEach(p => { html += `<li>${p.status === 'Active' ? '🟢' : '🟡'} ${p.name} (#${p.queuePosition})</li>`; });
         html += `<li style="margin-top:10px;"><b>Next Up:</b></li>`;
         nextUpUsers.forEach(p => { html += `<li>${p.name} (#${p.queuePosition})</li>`; });
         html += `</ul><div id="selection-area"></div></div>`;
         container.innerHTML = html;
+
         const canUserSelect = ['Active', 'Standby', 'Backup'].includes(data.currentUser.status);
         if (canUserSelect) {
-          const isEvenRound = data.currentRound % 2 === 0;
-          if(isEvenRound) {
-            const highestPositionInWindow = Math.max(...activeUsers.map(p => p.queuePosition));
-            if (data.currentUser.queuePosition >= highestPositionInWindow - 2) {
-              buildSelectionForm(data.availableWeeks);
-            } else {
-              document.getElementById("selection-area").innerHTML = `<p><b>You are in the selection window!</b> However, to be fair, please wait for #${highestPositionInWindow} to make their selection before you choose.</p>`;
-            }
-          } else {
-            const lowestPositionInWindow = Math.min(...activeUsers.map(p => p.queuePosition));
-            if (data.currentUser.queuePosition <= lowestPositionInWindow + 2) {
-              buildSelectionForm(data.availableWeeks);
-            } else {
-              document.getElementById("selection-area").innerHTML = `<p><b>You are in the selection window!</b> However, to be fair, please wait for #${lowestPositionInWindow} to make their selection before you choose.</p>`;
-            }
-          }
+            buildSelectionForm(data.availableWeeks, data.currentRound);
         } else {
           document.getElementById("selection-area").innerHTML = `<p>It is not your turn to make a selection.</p>`;
         }
       }
 
-      function buildSelectionForm(weeks) {
+      function buildSelectionForm(weeks, currentRound) {
         const formDiv = document.getElementById("selection-area");
         const primeWeeks = weeks.filter(w => w.classification === 'Prime');
         const nonPrimeWeeks = weeks.filter(w => w.classification === 'Non-Prime');
-        let formHTML = `<h3>Your Turn to Select!</h3><p><b>Rule Reminder:</b> Select one Prime week OR one/two Non-Prime weeks.</p><label for="week1">Primary Week Selection:</label><select id="week1" style="width:100%"><option selected disabled>-- Choose a week --</option><optgroup label="Prime Weeks">${primeWeeks.map(w => `<option value="${w.valueDate}">${w.displayDate} (${w.spotsRemaining} spots left)</option>`).join('')}</optgroup><optgroup label="Non-Prime Weeks">${nonPrimeWeeks.map(w => `<option value="${w.valueDate}">${w.displayDate} (${w.spotsRemaining} spots left)</option>`).join('')}</optgroup></select><label for="week2">Additional Non-Prime Week (optional):</label><select id="week2" style="width:100%"><option value="" selected>-- No second week --</option>${nonPrimeWeeks.map(w => `<option value="${w.valueDate}">${w.displayDate} (${w.spotsRemaining} spots left)</option>`).join('')}</select><button onclick="submitSelection()" style="width:100%">Submit Selection</button>`;
+
+        let formHTML = `<h3>Your Turn to Select!</h3>`;
+        if (currentRound === 1) {
+            formHTML += `<p><b>Rule Reminder:</b> Round 1 allows for exactly ONE week selection only (Prime or Non-Prime).</p>`;
+        } else {
+            formHTML += `<p><b>Rule Reminder:</b> Select one Prime week OR one/two Non-Prime weeks.</p>`;
+        }
+
+        formHTML += `<label for="week1">Primary Week Selection:</label><select id="week1" style="width:100%" onchange="handleWeek1Change(this, ${currentRound})"><option selected disabled>-- Choose a week --</option><optgroup label="Prime Weeks">${primeWeeks.map(w => `<option value="${w.valueDate}" data-type="Prime">${w.displayDate} (${w.spotsRemaining} spots left)</option>`).join('')}</optgroup><optgroup label="Non-Prime Weeks">${nonPrimeWeeks.map(w => `<option value="${w.valueDate}" data-type="Non-Prime">${w.displayDate} (${w.spotsRemaining} spots left)</option>`).join('')}</optgroup></select>`;
+
+        if (currentRound !== 1) {
+            formHTML += `<label for="week2">Additional Non-Prime Week (optional):</label><select id="week2" style="width:100%" onchange="handleWeek2Change()"><option value="" selected>-- No second week --</option>${nonPrimeWeeks.map(w => `<option value="${w.valueDate}">${w.displayDate} (${w.spotsRemaining} spots left)</option>`).join('')}</select>`;
+            formHTML += `<p id="week2-warning" style="color: #854d0e; font-size: 0.9em; display: none;"><i>Warning: Choosing a second non-prime week will forfeit your next scheduled turn.</i></p>`;
+        }
+
+        formHTML += `<button onclick="submitSelection()" style="width:100%">Submit Selection</button>`;
         formDiv.innerHTML += formHTML;
       }
       
+      function handleWeek1Change(selectElement, currentRound) {
+          if (currentRound === 1) return; // Second week isn't shown anyway
+          const selectedOption = selectElement.options[selectElement.selectedIndex];
+          const weekType = selectedOption.getAttribute('data-type');
+          const week2Select = document.getElementById('week2');
+          const warningText = document.getElementById('week2-warning');
+
+          if (weekType === 'Prime') {
+              week2Select.value = "";
+              week2Select.disabled = true;
+              warningText.style.display = 'none';
+          } else {
+              week2Select.disabled = false;
+              if (week2Select.value !== "") {
+                  warningText.style.display = 'block';
+              } else {
+                  warningText.style.display = 'none';
+              }
+          }
+      }
+
+      function handleWeek2Change() {
+          const week2Select = document.getElementById('week2');
+          const warningText = document.getElementById('week2-warning');
+          if (week2Select.value !== "") {
+              warningText.style.display = 'block';
+          } else {
+              warningText.style.display = 'none';
+          }
+      }
+
       function submitSelection() {
         const week1 = document.getElementById("week1").value;
-        const week2 = document.getElementById("week2").value;
+        const week2Element = document.getElementById("week2");
+        const week2 = week2Element ? week2Element.value : "";
         const name = document.querySelector("#dashboard-content h2").textContent.replace("Welcome, ", "");
         if (document.getElementById("week1").selectedIndex === 0) {
           alert("Please select your primary week.");
@@ -216,6 +481,7 @@
           })
           .processSelection(selectionData);
       }
+
     </script>
   </body>
 </html>
