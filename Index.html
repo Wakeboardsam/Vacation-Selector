@@ -187,6 +187,26 @@
       }
       .badge-prime { background-color: var(--prime-bg); color: var(--prime-text); }
       .badge-nonprime { background-color: #e5e7eb; color: var(--text-color); }
+    <style> 
+      body { font-family: Arial, sans-serif; background-color: #f0f2f5; margin: 0; }
+      .container { max-width: 1200px; margin: 20px auto; background-color: white; padding: 2rem; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+      nav { background-color: #333; padding: 1rem; text-align: center; }
+      nav a { color: white; text-decoration: none; font-size: 1.2rem; margin: 0 15px; cursor: pointer; }
+      h1, h2, h3 { color: #333; }
+      select, input, button { padding: 10px; margin: 10px 0; border-radius: 5px; border: 1px solid #ccc; box-sizing: border-box; }
+      button { background-color: #007bff; color: white; cursor: pointer; border: none; font-size: 1rem; }
+      table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+      th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+      th { background-color: #f2f2f2; }
+      .prime { background-color: #fffbe0; }
+      .full { background-color: #ffebee; }
+      .highlight-pick { background-color: #e0f7fa !important; font-weight: bold; }
+      ul.status-list { list-style-type: none; padding: 0; }
+      ul.status-list li { margin: 5px 0; }
+      #public-container { display: flex; gap: 20px; }
+      #public-status-container { flex: 1; }
+      #public-calendar-container { flex: 3; }
+      #login-container, #dashboard-container { display: none; }
     </style>
   </head>
   <body>
