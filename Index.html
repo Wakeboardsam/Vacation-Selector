@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <style>
+      body { font-family: Arial, sans-serif; background-color: #f0f2f5; margin: 0; }
+      .container { max-width: 1200px; margin: 20px auto; background-color: white; padding: 2rem; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+      nav { background-color: #333; padding: 1rem; text-align: center; }
+      nav a { color: white; text-decoration: none; font-size: 1.2rem; margin: 0 15px; cursor: pointer; }
+      h1, h2, h3 { color: #333; }
+      select, input, button { padding: 10px; margin: 10px 0; border-radius: 5px; border: 1px solid #ccc; box-sizing: border-box; }
+      button { background-color: #007bff; color: white; cursor: pointer; border: none; font-size: 1rem; }
+      table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+      th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+      th { background-color: #f2f2f2; }
+      .prime { background-color: #fffbe0; }
+      .full { background-color: #ffebee; }
+      .highlight-pick { background-color: #e0f7fa !important; font-weight: bold; }
+      ul.status-list { list-style-type: none; padding: 0; }
+      ul.status-list li { margin: 5px 0; }
+      #public-container { display: flex; gap: 20px; }
+      #public-status-container { flex: 1; }
+      #public-calendar-container { flex: 3; }
+      #login-container, #dashboard-container { display: none; }
+    </style>
+  </head>
+  <body>
+    <nav>
+      <a onclick="showView('public-container-wrapper')">Public Calendar</a>
+      <a onclick="showView('login-container')">Login to Select</a>
+    </nav>
+
+    <div id="public-container-wrapper" class="container">
+      <div id="public-container">
+        <div id="public-status-container">
+          <h2>Current Status</h2>
+        </div>
+        <div id="public-calendar-container">
+          <h2>Public Calendar Grid</h2>
+          <div id="highlighter-controls">
+            <label for="name-highlighter">Highlight selections:</label>
+            <select id="name-highlighter" onchange="highlightName(this)"><option value="">-- Show All --</option></select>
+          </div>
+          <table id="calendar-table">
+            <thead><tr><th>Week Of</th><th>Type</th><th>Person 1</th><th>Person 2</th><th>Person 3</th><th>Person 4</th><th>Status</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    
+    <div id="login-container" class="container">
+      <h1>Vacation Week Selection</h1>
+      <select id="name-select"><option disabled selected>Select your name...</option></select>
+      <input type="password" id="pin-input" placeholder="Enter your PIN">
+      <button onclick="login()">Login</button>
+      <div id="status"></div>
+    </div>
+
+    <div id="dashboard-container" class="container"></div>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", function() {
+        showView('public-container-wrapper');
+        google.script.run.withSuccessHandler(displayPublicCalendar).getPublicCalendarData();
+        google.script.run.withSuccessHandler(populateNames).getParticipantNames();
+      });
+
+      function showView(viewId) {
+        document.getElementById('public-container-wrapper').style.display = 'none';
+        document.getElementById('login-container').style.display = 'none';
+        document.getElementById('dashboard-container').style.display = 'none';
+        document.getElementById(viewId).style.display = 'block';
+      }
+
+      function displayPublicCalendar(data) {
+        const statusDiv = document.getElementById("public-status-container");
+        let statusHtml = '<ul class="status-list">';
+        const activeUsers = data.turnQueue.filter(p => ['Active', 'Standby', 'Backup'].includes(p.status)).sort((a,b)=>a.queuePosition-b.queuePosition);
+        const nextUpUsers = data.turnQueue.filter(p => p.status === 'Waiting').sort((a,b)=>a.queuePosition-b.queuePosition).slice(0, 10);
+        statusHtml += `<li><b>Current Window:</b></li>`;
+        activeUsers.forEach(p => { statusHtml += `<li>${p.status === 'Active' ? '🟢' : '🟡'} ${p.name} (#${p.queuePosition})</li>`; });
+        statusHtml += `<li style="margin-top:10px;"><b>Next Up:</b></li>`;
+        nextUpUsers.forEach(p => { statusHtml += `<li>${p.name} (#${p.queuePosition})</li>`; });
+        statusHtml += `</ul>`;
+        statusDiv.innerHTML += statusHtml;
+
+        const tbody = document.querySelector("#calendar-table tbody");
+        tbody.innerHTML = '';
+        data.calendarData.forEach(week => {
+          let row = tbody.insertRow();
+          if (week.classification === 'Prime') row.classList.add('prime');
+          if (week.spotsRemaining === 0) row.classList.add('full');
+          row.insertCell().textContent = week.startDate;
+          row.insertCell().textContent = week.classification;
+          row.insertCell().textContent = week.person1 || '-';
+          row.insertCell().textContent = week.person2 || '-';
+          row.insertCell().textContent = week.person3 || '-';
+          row.insertCell().textContent = week.person4 || '-';
+          row.insertCell().textContent = week.spotsRemaining > 0 ? `${week.spotsRemaining} spots left` : 'FULL';
+        });
+      }
+
+      function highlightName(selectElement) {
+        const selectedName = selectElement.value;
+        const tableRows = document.querySelectorAll("#calendar-table tbody tr");
+        tableRows.forEach(row => {
+          for (let i = 2; i <= 5; i++) {
+            const cell = row.cells[i];
+            cell.classList.remove('highlight-pick');
+            if (selectedName && cell.textContent === selectedName) {
+              cell.classList.add('highlight-pick');
+            }
+          }
+        });
+      }
+
+      function populateNames(names) {
+        const nameSelects = [document.getElementById("name-select"), document.getElementById("name-highlighter")];
+        nameSelects.forEach(select => {
+          while (select.options.length > 1) { select.remove(1); }
+          names.sort().forEach(name => {
+            let option = document.createElement("option");
+            option.text = name;
+            option.value = name;
+            select.add(option);
+          });
+        });
+      }
+
+      function login() {
+        const name = document.getElementById("name-select").value;
+        const pin = document.getElementById("pin-input").value;
+        const statusDiv = document.getElementById("status");
+        statusDiv.textContent = "Checking...";
+        google.script.run.withSuccessHandler(result => {
+          if (result === "Success") {
+            statusDiv.textContent = "";
+            loadDashboard(name);
+          } else {
+            statusDiv.textContent = "Invalid PIN. Please try again.";
+          }
+        }).verifyUser(name, pin);
+      }
+
+      function loadDashboard(name) {
+        showView('dashboard-container');
+        google.script.run.withSuccessHandler(displayDashboard).getDashboardData(name);
+      }
+
+      function displayDashboard(data) {
+        const container = document.getElementById('dashboard-container');
+        let html = `<div id="dashboard-content"><h2>Welcome, ${data.currentUser.name}</h2><h3>Current Status</h3><ul class="status-list" style="list-style-type:none;padding:0;">`;
+        const activeUsers = data.turnQueue.filter(p => ['Active', 'Standby', 'Backup'].includes(p.status)).sort((a,b)=>a.queuePosition-b.queuePosition);
+        const nextUpUsers = data.turnQueue.filter(p => p.status === 'Waiting').sort((a,b)=>a.queuePosition-b.queuePosition).slice(0, 10);
+        html += `<li><b>Current Window (Round ${data.currentRound}):</b></li>`;
+        activeUsers.forEach(p => { html += `<li>${p.status === 'Active' ? '🟢' : '🟡'} ${p.name} (#${p.queuePosition})</li>`; });
+        html += `<li style="margin-top:10px;"><b>Next Up:</b></li>`;
+        nextUpUsers.forEach(p => { html += `<li>${p.name} (#${p.queuePosition})</li>`; });
+        html += `</ul><div id="selection-area"></div></div>`;
+        container.innerHTML = html;
+        const canUserSelect = ['Active', 'Standby', 'Backup'].includes(data.currentUser.status);
+        if (canUserSelect) {
+          const isEvenRound = data.currentRound % 2 === 0;
+          if(isEvenRound) {
+            const highestPositionInWindow = Math.max(...activeUsers.map(p => p.queuePosition));
+            if (data.currentUser.queuePosition >= highestPositionInWindow - 2) {
+              buildSelectionForm(data.availableWeeks);
+            } else {
+              document.getElementById("selection-area").innerHTML = `<p><b>You are in the selection window!</b> However, to be fair, please wait for #${highestPositionInWindow} to make their selection before you choose.</p>`;
+            }
+          } else {
+            const lowestPositionInWindow = Math.min(...activeUsers.map(p => p.queuePosition));
+            if (data.currentUser.queuePosition <= lowestPositionInWindow + 2) {
+              buildSelectionForm(data.availableWeeks);
+            } else {
+              document.getElementById("selection-area").innerHTML = `<p><b>You are in the selection window!</b> However, to be fair, please wait for #${lowestPositionInWindow} to make their selection before you choose.</p>`;
+            }
+          }
+        } else {
+          document.getElementById("selection-area").innerHTML = `<p>It is not your turn to make a selection.</p>`;
+        }
+      }
+
+      function buildSelectionForm(weeks) {
+        const formDiv = document.getElementById("selection-area");
+        const primeWeeks = weeks.filter(w => w.classification === 'Prime');
+        const nonPrimeWeeks = weeks.filter(w => w.classification === 'Non-Prime');
+        let formHTML = `<h3>Your Turn to Select!</h3><p><b>Rule Reminder:</b> Select one Prime week OR one/two Non-Prime weeks.</p><label for="week1">Primary Week Selection:</label><select id="week1" style="width:100%"><option selected disabled>-- Choose a week --</option><optgroup label="Prime Weeks">${primeWeeks.map(w => `<option value="${w.valueDate}">${w.displayDate} (${w.spotsRemaining} spots left)</option>`).join('')}</optgroup><optgroup label="Non-Prime Weeks">${nonPrimeWeeks.map(w => `<option value="${w.valueDate}">${w.displayDate} (${w.spotsRemaining} spots left)</option>`).join('')}</optgroup></select><label for="week2">Additional Non-Prime Week (optional):</label><select id="week2" style="width:100%"><option value="" selected>-- No second week --</option>${nonPrimeWeeks.map(w => `<option value="${w.valueDate}">${w.displayDate} (${w.spotsRemaining} spots left)</option>`).join('')}</select><button onclick="submitSelection()" style="width:100%">Submit Selection</button>`;
+        formDiv.innerHTML += formHTML;
+      }
+      
+      function submitSelection() {
+        const week1 = document.getElementById("week1").value;
+        const week2 = document.getElementById("week2").value;
+        const name = document.querySelector("#dashboard-content h2").textContent.replace("Welcome, ", "");
+        if (document.getElementById("week1").selectedIndex === 0) {
+          alert("Please select your primary week.");
+          return;
+        }
+        document.querySelector("#selection-area button").disabled = true;
+        document.querySelector("#selection-area button").textContent = "Submitting...";
+        const selectionData = { name: name, week1: week1, week2: (week2 === "" ? null : week2) };
+        google.script.run
+          .withSuccessHandler(function(result){
+            if(result.success){
+              alert("Selection successful!");
+            } else {
+              alert("Error: "+result.message);
+            }
+            window.location.reload();
+          })
+          .withFailureHandler(function(error){
+            alert("A critical error occurred: " + error.message);
+            window.location.reload();
+          })
+          .processSelection(selectionData);
+      }
+    </script>
+  </body>
+</html>
