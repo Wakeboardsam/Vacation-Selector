@@ -26,17 +26,31 @@ function getDashboardData(name) {
   const turnData = turnSheet.getDataRange().getValues();
   const weekData = weekSheet.getDataRange().getValues();
   const currentRound = configSheet.getRange("B2").getValue();
-  turnData.shift();
+  const turnHeaders = turnData.shift();
   weekData.shift();
-  const userRow = turnData.find(row => row[0] === name);
-  const currentUser = { name: userRow[0], queuePosition: userRow[2], status: userRow[3] };
-  const turnQueue = turnData.map(row => ({ name: row[0], queuePosition: row[2], status: row[3] }));
+
+  const nameIdx = turnHeaders.indexOf('Name');
+  const senIdx = turnHeaders.indexOf('SeniorityPosition');
+  const lotIdx = turnHeaders.indexOf('LotteryPosition');
+  const statusIdx = turnHeaders.indexOf('Status');
+
+  const userRow = turnData.find(row => row[nameIdx] === name);
+  const queuePos = currentRound === 1 ? userRow[senIdx] : userRow[lotIdx];
+  const currentUser = { name: userRow[nameIdx], queuePosition: queuePos, status: userRow[statusIdx] };
+
+  const turnQueue = turnData.map(row => ({
+      name: row[nameIdx],
+      queuePosition: currentRound === 1 ? row[senIdx] : row[lotIdx],
+      status: row[statusIdx]
+  }));
+
   const availableWeeks = weekData.filter(row => row[6] > 0).map(row => ({
     displayDate: row[0].toLocaleDateString("en-US", { timeZone: "UTC", month: 'short', day: 'numeric' }),
     valueDate: row[0].getTime(),
     classification: row[1],
     spotsRemaining: row[6]
   }));
+
   return {
     currentUser: currentUser,
     turnQueue: turnQueue,
@@ -48,10 +62,12 @@ function getPublicCalendarData() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const weekSheet = ss.getSheetByName('Week Availability');
   const turnSheet = ss.getSheetByName('Turn Management');
+  const configSheet = ss.getSheetByName('Config');
+  const currentRound = configSheet.getRange("B2").getValue();
   const weekData = weekSheet.getDataRange().getValues();
   const turnData = turnSheet.getDataRange().getValues();
+  const turnHeaders = turnData.shift();
   weekData.shift();
-  turnData.shift();
 
   const calendarData = weekData.map(row => ({
     startDate: row[0].toLocaleDateString("en-US", { timeZone: "UTC", month: 'short', day: 'numeric' }),
@@ -60,10 +76,15 @@ function getPublicCalendarData() {
     spotsRemaining: row[6]
   }));
 
+  const nameIdx = turnHeaders.indexOf('Name');
+  const senIdx = turnHeaders.indexOf('SeniorityPosition');
+  const lotIdx = turnHeaders.indexOf('LotteryPosition');
+  const statusIdx = turnHeaders.indexOf('Status');
+
   const turnQueue = turnData.map(row => ({
-    name: row[0],
-    queuePosition: row[2],
-    status: row[3]
+    name: row[nameIdx],
+    queuePosition: currentRound === 1 ? row[senIdx] : row[lotIdx],
+    status: row[statusIdx]
   }));
   
   return {
@@ -84,78 +105,176 @@ function processSelection(selectionData) {
     const currentRound = configSheet.getRange("B2").getValue();
     const turnHeaders = turnData.shift();
     weekData.shift();
-    const nameIndex = turnHeaders.indexOf('Name');
-    const statusIndex = turnHeaders.indexOf('Status');
-    const weeksSelectedIndex = turnHeaders.indexOf('WeeksSelected');
-    const queuePosIndex = turnHeaders.indexOf('QueuePosition');
-    const userRowIndex = turnData.findIndex(row => row[nameIndex] === selectionData.name);
+
+    const nameIdx = turnHeaders.indexOf('Name');
+    const statusIdx = turnHeaders.indexOf('Status');
+    const weeksSelectedIdx = turnHeaders.indexOf('WeeksSelected');
+    const senPosIdx = turnHeaders.indexOf('SeniorityPosition');
+    const lotPosIdx = turnHeaders.indexOf('LotteryPosition');
+    const skipIdx = turnHeaders.indexOf('SkipNextTurn');
+
+    const userRowIndex = turnData.findIndex(row => row[nameIdx] === selectionData.name);
     if (userRowIndex === -1) { return { success: false, message: "User not found." }; }
-    const userStatus = turnData[userRowIndex][statusIndex];
-    if (!['Active', 'Standby', 'Backup'].includes(userStatus)) { return { success: false, message: "It is not your turn to make a selection." }; }
+
+    const userStatus = turnData[userRowIndex][statusIdx];
+    if (!['Active', 'Standby', 'Backup'].includes(userStatus)) {
+        return { success: false, message: "It is not your turn to make a selection." };
+    }
+
+    if (!selectionData.week1) {
+        return { success: false, message: "Missing primary week selection." };
+    }
 
     if (currentRound === 1 && selectionData.week2) {
         return { success: false, message: "Invalid selection. You can only select exactly ONE week during Round 1." };
     }
 
-    if (selectionData.week1 && selectionData.week2) {
-      const week1Info = weekData.find(row => row[0].getTime() == selectionData.week1);
-      const week2Info = weekData.find(row => row[0].getTime() == selectionData.week2);
-      if (!week1Info || !week2Info) { return { success: false, message: "Error: One of the selected weeks could not be found." }; }
-      if (week1Info[1] === 'Prime' || week2Info[1] === 'Prime') { return { success: false, message: "Invalid selection. You cannot include a Prime week when selecting two weeks." }; }
+    if (selectionData.week1 === selectionData.week2) {
+        return { success: false, message: "You cannot select the same week twice in one submission." };
     }
-    const weeksPickedCount = selectionData.week2 ? 2 : 1;
-    const currentWeeksSelected = turnData[userRowIndex][weeksSelectedIndex];
-    turnSheet.getRange(userRowIndex + 2, weeksSelectedIndex + 1).setValue(currentWeeksSelected + weeksPickedCount);
-    turnSheet.getRange(userRowIndex + 2, statusIndex + 1).setValue('Completed');
-    const weeksToUpdate = [selectionData.week1, selectionData.week2].filter(w => w);
-    weeksToUpdate.forEach(weekValue => {
-      const weekIndex = weekData.findIndex(row => row[0].getTime() == weekValue);
-      if (weekIndex !== -1) {
-        const weekRowValues = weekSheet.getRange(weekIndex + 2, 3, 1, 5).getValues()[0];
-        for (let i = 0; i < 4; i++) {
-          if (!weekRowValues[i]) {
-            weekSheet.getRange(weekIndex + 2, i + 3).setValue(selectionData.name);
+
+    let w1Index = weekData.findIndex(row => row[0].getTime() == selectionData.week1);
+    let w2Index = selectionData.week2 ? weekData.findIndex(row => row[0].getTime() == selectionData.week2) : -1;
+
+    if (w1Index === -1 || (selectionData.week2 && w2Index === -1)) {
+        return { success: false, message: "One of the selected weeks does not exist." };
+    }
+
+    let w1Data = weekData[w1Index];
+    let w2Data = selectionData.week2 ? weekData[w2Index] : null;
+
+    // Check max capacity and existing spots
+    let w1EmptySlots = 0;
+    for (let i=2; i<=5; i++) { if (!w1Data[i]) w1EmptySlots++; }
+    if (w1EmptySlots === 0) return { success: false, message: "Primary week is full." };
+
+    if (w2Data) {
+        let w2EmptySlots = 0;
+        for (let i=2; i<=5; i++) { if (!w2Data[i]) w2EmptySlots++; }
+        if (w2EmptySlots === 0) return { success: false, message: "Secondary week is full." };
+    }
+
+    // Check double booking in the same week
+    for(let i=2; i<=5; i++){
+        if (w1Data[i] === selectionData.name) return { success: false, message: "You are already booked for the primary week." };
+        if (w2Data && w2Data[i] === selectionData.name) return { success: false, message: "You are already booked for the secondary week." };
+    }
+
+    if (selectionData.week2) {
+        if (w1Data[1] === 'Prime' || w2Data[1] === 'Prime') {
+            return { success: false, message: "Invalid selection. You cannot include a Prime week when selecting two weeks." };
+        }
+    }
+
+    // If validation passes, apply changes atomically.
+    // Determine exact slots to write to first so we don't do partial writes if there's a concurrency failure
+    let w1TargetCol = -1;
+    for(let i=2; i<=5; i++){
+        if(!weekSheet.getRange(w1Index + 2, i + 1).getValue()) {
+            w1TargetCol = i + 1;
             break;
-          }
         }
-        const spots = weekRowValues[4];
-        if (spots > 0) { weekSheet.getRange(weekIndex + 2, 7).setValue(spots - 1); }
-      }
-    });
-    let updatedTurnData = turnSheet.getDataRange().getValues();
-    updatedTurnData.shift();
-    const isRoundOver = updatedTurnData.every(row => row[weeksSelectedIndex] >= currentRound);
+    }
+    if (w1TargetCol === -1) throw new Error("Concurrency error: primary week filled up.");
+
+    let w2TargetCol = -1;
+    if (selectionData.week2) {
+        for(let i=2; i<=5; i++){
+            if(!weekSheet.getRange(w2Index + 2, i + 1).getValue()) {
+                w2TargetCol = i + 1;
+                break;
+            }
+        }
+        if (w2TargetCol === -1) throw new Error("Concurrency error: secondary week filled up.");
+    }
+
+    // Perform writes
+    weekSheet.getRange(w1Index + 2, w1TargetCol).setValue(selectionData.name);
+    weekSheet.getRange(w1Index + 2, 7).setValue(w1EmptySlots - 1);
+
+    if (selectionData.week2) {
+        weekSheet.getRange(w2Index + 2, w2TargetCol).setValue(selectionData.name);
+        let currentSpots = (w2Data ? (4 - (w2Data.filter((_, idx) => idx >= 2 && idx <= 5 && w2Data[idx]).length)) : 0);
+        let newW2Spots = Math.max(0, currentSpots - 1);
+        weekSheet.getRange(w2Index + 2, 7).setValue(newW2Spots);
+    }
+
+    // Update Turn Sheet for current user
+    const weeksPickedCount = selectionData.week2 ? 2 : 1;
+    const currentWeeksSelected = turnData[userRowIndex][weeksSelectedIdx];
+    turnSheet.getRange(userRowIndex + 2, weeksSelectedIdx + 1).setValue(currentWeeksSelected + weeksPickedCount);
+    turnSheet.getRange(userRowIndex + 2, statusIdx + 1).setValue('Completed');
+
+    if (selectionData.week2) {
+        turnSheet.getRange(userRowIndex + 2, skipIdx + 1).setValue(true);
+    }
+
+    // RE-EVALUATE QUEUE STATE (Deadlock fix: Loop to clear skips, advancing round if necessary)
     let nextRound = currentRound;
-    if (isRoundOver) {
-      nextRound++;
-      configSheet.getRange("B2").setValue(nextRound);
-    }
-    let eligibleUsers = [];
-    updatedTurnData.forEach((row, index) => {
-      if (row[weeksSelectedIndex] < nextRound) {
-        eligibleUsers.push({ data: row, originalIndex: index + 2 });
-      }
-    });
-    const isEvenRound = nextRound % 2 === 0;
-    if (isEvenRound) {
-      eligibleUsers.sort((a, b) => b.data[queuePosIndex] - a.data[queuePosIndex]);
-    } else {
-      eligibleUsers.sort((a, b) => a.data[queuePosIndex] - b.data[queuePosIndex]);
-    }
-    if (isRoundOver) {
-      turnSheet.getRange(2, statusIndex + 1, turnSheet.getLastRow() - 1, 1).setValue('Waiting');
-    } else {
-      const turnSheetData = turnSheet.getDataRange().getValues();
-      turnSheetData.shift();
-      turnSheetData.forEach((row, index) => {
-        if(row[statusIndex] !== 'Completed') {
-          turnSheet.getRange(index + 2, statusIndex + 1).setValue('Waiting');
+    let filledSlots = 0;
+    const windowSlots = ['Active', 'Standby', 'Backup'];
+    let activatedUserIndices = []; // Track who we put in the window
+
+    // Clear current window state (everyone not Completed goes to Waiting)
+    let resetTurnData = turnSheet.getDataRange().getValues();
+    resetTurnData.shift();
+    resetTurnData.forEach((row, index) => {
+        if (row[statusIdx] !== 'Completed') {
+            turnSheet.getRange(index + 2, statusIdx + 1).setValue('Waiting');
         }
-      });
+    });
+
+    while (filledSlots < 3) {
+        // Read fresh turn data
+        let currentTurnData = turnSheet.getDataRange().getValues();
+        currentTurnData.shift();
+
+        let isRoundOver = currentTurnData.every(row => row[statusIdx] === 'Completed');
+
+        if (isRoundOver) {
+            nextRound++;
+            configSheet.getRange("B2").setValue(nextRound);
+            currentTurnData.forEach((row, index) => {
+                turnSheet.getRange(index + 2, statusIdx + 1).setValue('Waiting');
+                currentTurnData[index][statusIdx] = 'Waiting';
+            });
+        }
+
+        let eligibleUsers = [];
+        currentTurnData.forEach((row, index) => {
+            if (row[statusIdx] !== 'Completed' && !activatedUserIndices.includes(index + 2)) {
+                eligibleUsers.push({ data: row, originalIndex: index + 2 });
+            }
+        });
+
+        if (eligibleUsers.length === 0) break; // End of everyone if no one left
+
+        if (nextRound === 1) {
+            eligibleUsers.sort((a, b) => a.data[senPosIdx] - b.data[senPosIdx]);
+        } else {
+            const isEvenRound = nextRound % 2 === 0;
+            if (isEvenRound) {
+                eligibleUsers.sort((a, b) => a.data[lotPosIdx] - b.data[lotPosIdx]);
+            } else {
+                eligibleUsers.sort((a, b) => b.data[lotPosIdx] - a.data[lotPosIdx]);
+            }
+        }
+
+        let candidate = eligibleUsers[0]; // Take top candidate
+
+        if (candidate.data[skipIdx] === true) {
+            // Consume skip and try loop again
+            turnSheet.getRange(candidate.originalIndex, skipIdx + 1).setValue(false);
+            turnSheet.getRange(candidate.originalIndex, statusIdx + 1).setValue('Completed');
+            // Do not increment filledSlots since they are skipped
+        } else {
+            // Add to window
+            turnSheet.getRange(candidate.originalIndex, statusIdx + 1).setValue(windowSlots[filledSlots]);
+            activatedUserIndices.push(candidate.originalIndex);
+            filledSlots++;
+        }
     }
-    if (eligibleUsers.length > 0) turnSheet.getRange(eligibleUsers[0].originalIndex, statusIndex + 1).setValue('Active');
-    if (eligibleUsers.length > 1) turnSheet.getRange(eligibleUsers[1].originalIndex, statusIndex + 1).setValue('Standby');
-    if (eligibleUsers.length > 2) turnSheet.getRange(eligibleUsers[2].originalIndex, statusIndex + 1).setValue('Backup');
+
     return { success: true, message: "Selection recorded." };
   } catch (e) {
     return { success: false, message: "An error occurred: " + e.message };

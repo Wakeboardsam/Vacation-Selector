@@ -47,6 +47,7 @@
         display: flex;
         justify-content: center;
         gap: 1rem;
+        flex-wrap: wrap;
       }
 
       nav a {
@@ -170,6 +171,13 @@
       #public-container { display: flex; gap: 2rem; flex-wrap: wrap; }
       #public-status-container { flex: 1; min-width: 250px; }
       #public-calendar-container { flex: 3; min-width: 300px; }
+
+      /* Make table scrollable on small screens */
+      .table-wrapper {
+          overflow-x: auto;
+          width: 100%;
+      }
+
       #login-container { max-width: 400px; }
       #dashboard-container { display: none; }
 
@@ -187,26 +195,6 @@
       }
       .badge-prime { background-color: var(--prime-bg); color: var(--prime-text); }
       .badge-nonprime { background-color: #e5e7eb; color: var(--text-color); }
-    <style> 
-      body { font-family: Arial, sans-serif; background-color: #f0f2f5; margin: 0; }
-      .container { max-width: 1200px; margin: 20px auto; background-color: white; padding: 2rem; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
-      nav { background-color: #333; padding: 1rem; text-align: center; }
-      nav a { color: white; text-decoration: none; font-size: 1.2rem; margin: 0 15px; cursor: pointer; }
-      h1, h2, h3 { color: #333; }
-      select, input, button { padding: 10px; margin: 10px 0; border-radius: 5px; border: 1px solid #ccc; box-sizing: border-box; }
-      button { background-color: #007bff; color: white; cursor: pointer; border: none; font-size: 1rem; }
-      table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-      th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-      th { background-color: #f2f2f2; }
-      .prime { background-color: #fffbe0; }
-      .full { background-color: #ffebee; }
-      .highlight-pick { background-color: #e0f7fa !important; font-weight: bold; }
-      ul.status-list { list-style-type: none; padding: 0; }
-      ul.status-list li { margin: 5px 0; }
-      #public-container { display: flex; gap: 20px; }
-      #public-status-container { flex: 1; }
-      #public-calendar-container { flex: 3; }
-      #login-container, #dashboard-container { display: none; }
     </style>
   </head>
   <body>
@@ -226,10 +214,12 @@
             <label for="name-highlighter">Highlight selections:</label>
             <select id="name-highlighter" onchange="highlightName(this)"><option value="">-- Show All --</option></select>
           </div>
-          <table id="calendar-table">
-            <thead><tr><th>Week Of</th><th>Type</th><th>Person 1</th><th>Person 2</th><th>Person 3</th><th>Person 4</th><th>Status</th></tr></thead>
-            <tbody></tbody>
-          </table>
+          <div class="table-wrapper">
+            <table id="calendar-table">
+              <thead><tr><th>Week Of</th><th>Type</th><th>Person 1</th><th>Person 2</th><th>Person 3</th><th>Person 4</th><th>Status</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
         </div>
       </div>
     </div>
@@ -350,14 +340,14 @@
           if(isEvenRound) {
             const highestPositionInWindow = Math.max(...activeUsers.map(p => p.queuePosition));
             if (data.currentUser.queuePosition >= highestPositionInWindow - 2) {
-              buildSelectionForm(data.availableWeeks, data.currentRound);
+              buildSelectionForm(data.availableWeeks);
             } else {
               document.getElementById("selection-area").innerHTML = `<p><b>You are in the selection window!</b> However, to be fair, please wait for #${highestPositionInWindow} to make their selection before you choose.</p>`;
             }
           } else {
             const lowestPositionInWindow = Math.min(...activeUsers.map(p => p.queuePosition));
             if (data.currentUser.queuePosition <= lowestPositionInWindow + 2) {
-              buildSelectionForm(data.availableWeeks, data.currentRound);
+              buildSelectionForm(data.availableWeeks);
             } else {
               document.getElementById("selection-area").innerHTML = `<p><b>You are in the selection window!</b> However, to be fair, please wait for #${lowestPositionInWindow} to make their selection before you choose.</p>`;
             }
@@ -367,46 +357,17 @@
         }
       }
 
-      function buildSelectionForm(weeks, currentRound) {
+      function buildSelectionForm(weeks) {
         const formDiv = document.getElementById("selection-area");
         const primeWeeks = weeks.filter(w => w.classification === 'Prime');
         const nonPrimeWeeks = weeks.filter(w => w.classification === 'Non-Prime');
-
-        let formHTML = `<h3>Your Turn to Select!</h3>`;
-        if (currentRound === 1) {
-            formHTML += `<p><b>Rule Reminder:</b> Round 1 allows for exactly ONE week selection only (Prime or Non-Prime).</p>`;
-        } else {
-            formHTML += `<p><b>Rule Reminder:</b> Select one Prime week OR one/two Non-Prime weeks.</p>`;
-        }
-
-        formHTML += `<label for="week1">Primary Week Selection:</label><select id="week1" style="width:100%" onchange="handleWeek1Change(this, ${currentRound})"><option selected disabled>-- Choose a week --</option><optgroup label="Prime Weeks">${primeWeeks.map(w => `<option value="${w.valueDate}" data-type="Prime">${w.displayDate} (${w.spotsRemaining} spots left)</option>`).join('')}</optgroup><optgroup label="Non-Prime Weeks">${nonPrimeWeeks.map(w => `<option value="${w.valueDate}" data-type="Non-Prime">${w.displayDate} (${w.spotsRemaining} spots left)</option>`).join('')}</optgroup></select>`;
-
-        if (currentRound !== 1) {
-            formHTML += `<label for="week2">Additional Non-Prime Week (optional):</label><select id="week2" style="width:100%"><option value="" selected>-- No second week --</option>${nonPrimeWeeks.map(w => `<option value="${w.valueDate}">${w.displayDate} (${w.spotsRemaining} spots left)</option>`).join('')}</select>`;
-        }
-
-        formHTML += `<button onclick="submitSelection()" style="width:100%">Submit Selection</button>`;
+        let formHTML = `<h3>Your Turn to Select!</h3><p><b>Rule Reminder:</b> Select one Prime week OR one/two Non-Prime weeks.</p><label for="week1">Primary Week Selection:</label><select id="week1" style="width:100%"><option selected disabled>-- Choose a week --</option><optgroup label="Prime Weeks">${primeWeeks.map(w => `<option value="${w.valueDate}">${w.displayDate} (${w.spotsRemaining} spots left)</option>`).join('')}</optgroup><optgroup label="Non-Prime Weeks">${nonPrimeWeeks.map(w => `<option value="${w.valueDate}">${w.displayDate} (${w.spotsRemaining} spots left)</option>`).join('')}</optgroup></select><label for="week2">Additional Non-Prime Week (optional):</label><select id="week2" style="width:100%"><option value="" selected>-- No second week --</option>${nonPrimeWeeks.map(w => `<option value="${w.valueDate}">${w.displayDate} (${w.spotsRemaining} spots left)</option>`).join('')}</select><button onclick="submitSelection()" style="width:100%">Submit Selection</button>`;
         formDiv.innerHTML += formHTML;
       }
       
-      function handleWeek1Change(selectElement, currentRound) {
-          if (currentRound === 1) return; // Second week isn't shown anyway
-          const selectedOption = selectElement.options[selectElement.selectedIndex];
-          const weekType = selectedOption.getAttribute('data-type');
-          const week2Select = document.getElementById('week2');
-
-          if (weekType === 'Prime') {
-              week2Select.value = "";
-              week2Select.disabled = true;
-          } else {
-              week2Select.disabled = false;
-          }
-      }
-
       function submitSelection() {
         const week1 = document.getElementById("week1").value;
-        const week2Element = document.getElementById("week2");
-        const week2 = week2Element ? week2Element.value : "";
+        const week2 = document.getElementById("week2").value;
         const name = document.querySelector("#dashboard-content h2").textContent.replace("Welcome, ", "");
         if (document.getElementById("week1").selectedIndex === 0) {
           alert("Please select your primary week.");
