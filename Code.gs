@@ -216,146 +216,6 @@ function initializeLotteryRound() {
     return "Lottery Round 2 Initialized Successfully.";
 }
 
-function getDashboardData(name) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const turnSheet = ss.getSheetByName('Turn Management');
-  const weekSheet = ss.getSheetByName('Week Availability');
-  const configSheet = ss.getSheetByName('Config');
-  const turnData = turnSheet.getDataRange().getValues();
-  const weekData = weekSheet.getDataRange().getValues();
-  const currentRound = configSheet.getRange("B2").getValue();
-  const turnHeaders = turnData.shift();
-  weekData.shift();
-
-  const nameIdx = turnHeaders.indexOf('Name');
-  const senIdx = turnHeaders.indexOf('SeniorityPosition');
-  const lotIdx = turnHeaders.indexOf('LotteryPosition');
-  const statusIdx = turnHeaders.indexOf('Status');
-
-  const userRow = turnData.find(row => row[nameIdx] === name);
-  const queuePos = currentRound === 1 ? userRow[senIdx] : userRow[lotIdx];
-  const currentUser = { name: userRow[nameIdx], queuePosition: queuePos, status: userRow[statusIdx] };
-
-  const turnQueue = turnData.map(row => ({
-      name: row[nameIdx],
-      queuePosition: currentRound === 1 ? row[senIdx] : row[lotIdx],
-      status: row[statusIdx]
-  }));
-
-  const availableWeeks = weekData.filter(row => row[6] > 0).map(row => ({
-    displayDate: row[0].toLocaleDateString("en-US", { timeZone: "UTC", month: 'short', day: 'numeric' }),
-    valueDate: row[0].getTime(),
-    classification: row[1],
-    spotsRemaining: row[6]
-  }));
-
-  return {
-    currentUser: currentUser,
-    turnQueue: turnQueue,
-    availableWeeks: availableWeeks,
-    currentRound: currentRound
-  };
-}
-function getPublicCalendarData() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const weekSheet = ss.getSheetByName('Week Availability');
-  const turnSheet = ss.getSheetByName('Turn Management');
-  const configSheet = ss.getSheetByName('Config');
-  const currentRound = configSheet.getRange("B2").getValue();
-  const weekData = weekSheet.getDataRange().getValues();
-  const turnData = turnSheet.getDataRange().getValues();
-  const turnHeaders = turnData.shift();
-  weekData.shift();
-
-  const calendarData = weekData.map(row => ({
-    startDate: row[0].toLocaleDateString("en-US", { timeZone: "UTC", month: 'short', day: 'numeric' }),
-    classification: row[1],
-    person1: row[2], person2: row[3], person3: row[4], person4: row[5],
-    spotsRemaining: row[6]
-  }));
-
-  const nameIdx = turnHeaders.indexOf('Name');
-  const senIdx = turnHeaders.indexOf('SeniorityPosition');
-  const lotIdx = turnHeaders.indexOf('LotteryPosition');
-  const statusIdx = turnHeaders.indexOf('Status');
-
-  const turnQueue = turnData.map(row => ({
-    name: row[nameIdx],
-    queuePosition: currentRound === 1 ? row[senIdx] : row[lotIdx],
-    status: row[statusIdx]
-  }));
-
-  return {
-      calendarData: calendarData,
-      turnQueue: turnQueue,
-      currentRound: currentRound
-  };
-}
-function setupSpreadsheetSchema() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const turnSheet = ss.getSheetByName('Turn Management');
-  if (!turnSheet) return "Turn Management sheet not found.";
-
-  const headersRange = turnSheet.getRange(1, 1, 1, turnSheet.getLastColumn());
-  let headers = headersRange.getValues()[0];
-
-  let modifications = false;
-
-  // 1. Rename QueuePosition to SeniorityPosition
-  let qIndex = headers.indexOf('QueuePosition');
-  if (qIndex !== -1) {
-    turnSheet.getRange(1, qIndex + 1).setValue('SeniorityPosition');
-    headers[qIndex] = 'SeniorityPosition';
-    modifications = true;
-  }
-
-  // 2. Add LotteryPosition if missing
-  if (headers.indexOf('LotteryPosition') === -1) {
-    let newCol = headers.length + 1;
-    turnSheet.getRange(1, newCol).setValue('LotteryPosition');
-    headers.push('LotteryPosition');
-    modifications = true;
-  }
-
-  // 3. Add SkipNextTurn if missing
-  if (headers.indexOf('SkipNextTurn') === -1) {
-    let newCol = headers.length + 1;
-    turnSheet.getRange(1, newCol).setValue('SkipNextTurn');
-
-    // Initialize to false
-    if (turnSheet.getLastRow() > 1) {
-      turnSheet.getRange(2, newCol, turnSheet.getLastRow() - 1, 1).setValue(false);
-    }
-    headers.push('SkipNextTurn');
-    modifications = true;
-  }
-
-  return modifications ? "Schema updated successfully." : "Schema already up to date.";
-}
-
-function validateSchema(turnData, currentRound) {
-    const headers = turnData[0];
-    const required = ['Name', 'PIN', 'SeniorityPosition', 'Status', 'WeeksSelected', 'LotteryPosition', 'SkipNextTurn'];
-    for (let req of required) {
-        if (headers.indexOf(req) === -1) {
-            return { valid: false, message: "Missing required column: " + req + ". Please run setupSpreadsheetSchema()." };
-        }
-    }
-
-    // Check LotteryPosition setup if moving past round 1
-    if (currentRound > 1) {
-        const lotIdx = headers.indexOf('LotteryPosition');
-        let usedPositions = new Set();
-        for (let i = 1; i < turnData.length; i++) {
-            let val = turnData[i][lotIdx];
-            if (!val || val === "") return { valid: false, message: "LotteryPosition is missing values for some participants. Cannot proceed past Round 1." };
-            if (usedPositions.has(val)) return { valid: false, message: "LotteryPosition contains duplicate values. Must be a unique order." };
-            usedPositions.add(val);
-        }
-    }
-    return { valid: true };
-}
-
 function processSelection(selectionData) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const turnSheet = ss.getSheetByName('Turn Management');
@@ -501,65 +361,59 @@ function processSelection(selectionData) {
         return { success: true, message: "Selection recorded. Selection process is now complete." };
     }
 
-        // RE-EVALUATE QUEUE STATE
+        // RE-EVALUATE QUEUE STATE (Deadlock fix for skips crossing boundaries)
     let nextRound = currentRound;
     let filledSlots = 0;
     const windowSlots = ['Active', 'Standby', 'Backup'];
     let activatedUserIndices = [];
 
-    // Check if the current round is completely over
-    let currentTurnData = turnSheet.getDataRange().getValues();
-    currentTurnData.shift();
-    let isRoundOver = currentTurnData.every(row => row[statusIdx] === 'Completed');
-
-    if (isRoundOver) {
-        if (currentRound === 1 && !checkLotteryReady(turnDataRaw)) {
-            // Round 1 is complete, but Lottery is not ready.
-            // Do NOT advance config to round 2, do not reset everyone.
-            // We just clear out the Active window to Waiting.
-            // When admin runs initializeLotteryRound(), it will pick up from here.
-            currentTurnData.forEach((row, index) => {
-                if (row[statusIdx] !== 'Completed') {
-                    turnSheet.getRange(index + 2, statusIdx + 1).setValue('Waiting');
-                }
-            });
-            return { success: true, message: "Selection recorded. Round 1 complete — awaiting lottery setup." };
-        } else {
-            // Safe to advance round
-            nextRound++;
-            configSheet.getRange("B2").setValue(nextRound);
-            currentTurnData.forEach((row, index) => {
-                turnSheet.getRange(index + 2, statusIdx + 1).setValue('Waiting');
-                currentTurnData[index][statusIdx] = 'Waiting';
-            });
+    // Set everyone who is not 'Completed' to 'Waiting' to clear the current window
+    let resetTurnData = turnSheet.getDataRange().getValues();
+    resetTurnData.shift();
+    resetTurnData.forEach((row, index) => {
+        if (row[statusIdx] !== 'Completed') {
+            turnSheet.getRange(index + 2, statusIdx + 1).setValue('Waiting');
         }
-    }
+    });
 
-    // Clear current window state for anyone not Completed
-    // if we haven't already reset it above
-    if (!isRoundOver) {
-        currentTurnData.forEach((row, index) => {
-            if (row[statusIdx] !== 'Completed') {
-                turnSheet.getRange(index + 2, statusIdx + 1).setValue('Waiting');
-                currentTurnData[index][statusIdx] = 'Waiting';
+    let loopGuard = 0; // Prevent infinite loops
+    while (filledSlots < 3 && loopGuard < 100) {
+        loopGuard++;
+
+        let currentTurnData = turnSheet.getDataRange().getValues();
+        currentTurnData.shift();
+
+        // Check if the current round is completely over
+        let isRoundOver = currentTurnData.every(row => row[statusIdx] === 'Completed');
+
+        if (isRoundOver) {
+            if (nextRound === 1) {
+                // Round 1 is complete. Administrator must run initializeLotteryRound().
+                return { success: true, message: "Selection recorded. Round 1 complete — awaiting lottery setup." };
+            } else {
+                // Advance to the next lottery round automatically
+                nextRound++;
+                configSheet.getRange("B2").setValue(nextRound);
+                currentTurnData.forEach((row, index) => {
+                    turnSheet.getRange(index + 2, statusIdx + 1).setValue('Waiting');
+                    currentTurnData[index][statusIdx] = 'Waiting';
+                });
             }
-        });
-    }
+        }
 
-    // Now populate the 3-person window for the active round (which might be the newly advanced nextRound)
-    while (filledSlots < 3) {
-        // Read fresh turn data to recalculate who is left
-        let freshTurnData = turnSheet.getDataRange().getValues();
-        freshTurnData.shift();
-
+        // Find eligible candidates in this round
         let eligibleUsers = [];
-        freshTurnData.forEach((row, index) => {
+        currentTurnData.forEach((row, index) => {
             if (row[statusIdx] !== 'Completed' && !activatedUserIndices.includes(index + 2)) {
                 eligibleUsers.push({ data: row, originalIndex: index + 2 });
             }
         });
 
-        if (eligibleUsers.length === 0) break; // End of everyone if no one left
+        if (eligibleUsers.length === 0) {
+            // Should only happen if sheet is entirely full (caught earlier)
+            // or if it's the very last round ever and we just completed everyone.
+            break;
+        }
 
         if (nextRound === 1) {
             eligibleUsers.sort((a, b) => a.data[senPosIdx] - b.data[senPosIdx]);
@@ -572,22 +426,22 @@ function processSelection(selectionData) {
             }
         }
 
-        let candidate = eligibleUsers[0]; // Take top candidate
+        let candidate = eligibleUsers[0]; // Evaluate top candidate
 
         if (candidate.data[skipIdx] === true) {
             // Consume skip and mark completed for this round
             turnSheet.getRange(candidate.originalIndex, skipIdx + 1).setValue(false);
             turnSheet.getRange(candidate.originalIndex, statusIdx + 1).setValue('Completed');
-            // Do NOT add them to the window. Let the loop re-evaluate with them marked Completed.
+            // We loop again immediately so we can re-check `isRoundOver`
         } else {
-            // Add to window
+            // Not skipped, add to window
             turnSheet.getRange(candidate.originalIndex, statusIdx + 1).setValue(windowSlots[filledSlots]);
             activatedUserIndices.push(candidate.originalIndex);
             filledSlots++;
         }
     }
 
-return { success: true, message: "Selection recorded." };
+    return { success: true, message: "Selection recorded." };
   } catch (e) {
     return { success: false, message: "An error occurred: " + e.message };
   } finally {
