@@ -2,6 +2,33 @@
 function doGet(e) {
   return HtmlService.createHtmlOutputFromFile('Index').setTitle('Vacation Week Selection System');
 }
+function normalizeClassification(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+
+  if (normalized === 'prime') return 'Prime';
+  if (
+    normalized === 'non-prime' ||
+    normalized === 'non prime' ||
+    normalized === 'nonprime'
+  ) {
+    return 'Non-Prime';
+  }
+
+  return null;
+}
+
+function buildAvailableWeekData(rows) {
+  return rows
+    .filter(row => Number(row[6]) > 0)
+    .map(row => ({
+      displayDate: row[0] instanceof Date ? row[0].toLocaleDateString("en-US", { timeZone: "UTC", month: 'short', day: 'numeric' }) : String(row[0]),
+      valueDate: row[0] instanceof Date ? row[0].getTime() : null,
+      classification: normalizeClassification(row[1]),
+      spotsRemaining: Number(row[6]),
+      originalClassification: row[1]
+    }));
+}
+
 function getParticipantNames() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName('Turn Management');
@@ -18,38 +45,96 @@ function verifyUser(name, pin) {
   }
   return "Invalid PIN";
 }
+function calculateQueueWindow(turnDataRaw, currentRound) {
+    const turnData = [...turnDataRaw];
+    const turnHeaders = turnData.shift();
+
+    const nameIdx = turnHeaders.indexOf('Name');
+    const statusIdx = turnHeaders.indexOf('Status');
+    const senPosIdx = turnHeaders.indexOf('SeniorityPosition');
+    const lotPosIdx = turnHeaders.indexOf('LotteryPosition');
+    const skipIdx = turnHeaders.indexOf('SkipNextTurn');
+
+    // Create an array of objects to sort easily
+    let queue = turnData.map((row, index) => ({
+        originalIndex: index + 1, // +1 because we shifted headers, and another +1 for 1-based indexing in sheets if needed, but we'll use original row data
+        name: row[nameIdx],
+        status: row[statusIdx],
+        skipNextTurn: row[skipIdx],
+        seniorityPosition: row[senPosIdx],
+        lotteryPosition: row[lotPosIdx],
+        queuePosition: currentRound === 1 ? row[senPosIdx] : row[lotPosIdx],
+        computedStatus: 'Waiting'
+    }));
+
+    // Sort queue based on current round rules
+    if (currentRound === 1) {
+        queue.sort((a, b) => a.seniorityPosition - b.seniorityPosition);
+    } else {
+        const isEvenRound = currentRound % 2 === 0;
+        if (isEvenRound) {
+            queue.sort((a, b) => a.lotteryPosition - b.lotteryPosition);
+        } else {
+            queue.sort((a, b) => b.lotteryPosition - a.lotteryPosition);
+        }
+    }
+
+    // Find the anchor: the first person who is not 'Completed' and not 'skipped' (if we were consuming skips)
+    // Wait, the requirement says: "Do not consume SkipNextTurn in read-only getter functions. Consume skips only under the script lock during state transitions."
+    // And "A completed or skipped interior position leaves a hole; it must not pull a fourth person into the window while the earliest unfinished person remains."
+
+    let anchorIndex = queue.findIndex(person => person.status !== 'Completed');
+
+    if (anchorIndex !== -1) {
+        const windowSlots = ['Active', 'Standby', 'Backup'];
+        // The permitted window consists of that queue position and the next two queue positions only.
+        for (let offset = 0; offset < 3; offset++) {
+            const personIndex = anchorIndex + offset;
+            if (personIndex < queue.length) {
+                let person = queue[personIndex];
+                if (person.status !== 'Completed' && person.skipNextTurn !== true) {
+                    person.computedStatus = windowSlots[offset];
+                } else if (person.skipNextTurn === true && person.status !== 'Completed') {
+                    // If they are skipping, they leave a hole.
+                    person.computedStatus = 'Waiting';
+                } else if (person.status === 'Completed') {
+                     // If they are completed but inside the window (can happen if someone completes out of order), they leave a hole
+                    person.computedStatus = 'Completed';
+                }
+            }
+        }
+    } else {
+        // Everyone is completed
+        queue.forEach(p => p.computedStatus = 'Completed');
+    }
+
+    // Sort back to original order or keep sorted order for return. We'll return sorted queue.
+    return queue;
+}
+
 function getDashboardData(name) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const turnSheet = ss.getSheetByName('Turn Management');
   const weekSheet = ss.getSheetByName('Week Availability');
   const configSheet = ss.getSheetByName('Config');
-  const turnData = turnSheet.getDataRange().getValues();
+  const turnDataRaw = turnSheet.getDataRange().getValues();
   const weekData = weekSheet.getDataRange().getValues();
   const currentRound = configSheet.getRange("B2").getValue();
-  const turnHeaders = turnData.shift();
+
   weekData.shift();
 
-  const nameIdx = turnHeaders.indexOf('Name');
-  const senIdx = turnHeaders.indexOf('SeniorityPosition');
-  const lotIdx = turnHeaders.indexOf('LotteryPosition');
-  const statusIdx = turnHeaders.indexOf('Status');
+  const queueWindow = calculateQueueWindow(turnDataRaw, currentRound);
 
-  const userRow = turnData.find(row => row[nameIdx] === name);
-  const queuePos = currentRound === 1 ? userRow[senIdx] : userRow[lotIdx];
-  const currentUser = { name: userRow[nameIdx], queuePosition: queuePos, status: userRow[statusIdx] };
+  const userObj = queueWindow.find(p => p.name === name);
+  const currentUser = { name: userObj.name, queuePosition: userObj.queuePosition, status: userObj.computedStatus };
 
-  const turnQueue = turnData.map(row => ({
-      name: row[nameIdx],
-      queuePosition: currentRound === 1 ? row[senIdx] : row[lotIdx],
-      status: row[statusIdx]
+  const turnQueue = queueWindow.map(p => ({
+      name: p.name,
+      queuePosition: p.queuePosition,
+      status: p.computedStatus
   }));
 
-  const availableWeeks = weekData.filter(row => row[6] > 0).map(row => ({
-    displayDate: row[0].toLocaleDateString("en-US", { timeZone: "UTC", month: 'short', day: 'numeric' }),
-    valueDate: row[0].getTime(),
-    classification: row[1],
-    spotsRemaining: row[6]
-  }));
+  const availableWeeks = buildAvailableWeekData(weekData);
 
   return {
     currentUser: currentUser,
@@ -65,26 +150,22 @@ function getPublicCalendarData() {
   const configSheet = ss.getSheetByName('Config');
   const currentRound = configSheet.getRange("B2").getValue();
   const weekData = weekSheet.getDataRange().getValues();
-  const turnData = turnSheet.getDataRange().getValues();
-  const turnHeaders = turnData.shift();
+  const turnDataRaw = turnSheet.getDataRange().getValues();
   weekData.shift();
 
   const calendarData = weekData.map(row => ({
-    startDate: row[0].toLocaleDateString("en-US", { timeZone: "UTC", month: 'short', day: 'numeric' }),
-    classification: row[1],
+    startDate: row[0] instanceof Date ? row[0].toLocaleDateString("en-US", { timeZone: "UTC", month: 'short', day: 'numeric' }) : String(row[0]),
+    classification: normalizeClassification(row[1]) || row[1], // fallback for calendar display
     person1: row[2], person2: row[3], person3: row[4], person4: row[5],
     spotsRemaining: row[6]
   }));
 
-  const nameIdx = turnHeaders.indexOf('Name');
-  const senIdx = turnHeaders.indexOf('SeniorityPosition');
-  const lotIdx = turnHeaders.indexOf('LotteryPosition');
-  const statusIdx = turnHeaders.indexOf('Status');
+  const queueWindow = calculateQueueWindow(turnDataRaw, currentRound);
 
-  const turnQueue = turnData.map(row => ({
-    name: row[nameIdx],
-    queuePosition: currentRound === 1 ? row[senIdx] : row[lotIdx],
-    status: row[statusIdx]
+  const turnQueue = queueWindow.map(p => ({
+    name: p.name,
+    queuePosition: p.queuePosition,
+    status: p.computedStatus
   }));
   
   return {
@@ -202,16 +283,7 @@ function initializeLotteryRound() {
         eligibleUsers.push({ data: turnData[i], originalIndex: i+1 });
     }
 
-    // Round 2 uses top-to-bottom LotteryPosition (a - b)
-    eligibleUsers.sort((a, b) => a.data[lotPosIdx] - b.data[lotPosIdx]);
-
-    const windowSlots = ['Active', 'Standby', 'Backup'];
-    let filledSlots = 0;
-    while(eligibleUsers.length > 0 && filledSlots < 3) {
-        let candidate = eligibleUsers.shift();
-        turnSheet.getRange(candidate.originalIndex, statusIdx + 1).setValue(windowSlots[filledSlots]);
-        filledSlots++;
-    }
+    // Status is calculated dynamically now, we only need to reset Completed to Waiting
 
     return "Lottery Round 2 Initialized Successfully.";
 }
@@ -232,8 +304,8 @@ function processSelection(selectionData) {
     if (!schemaCheck.valid) { return { success: false, message: "System setup error: " + schemaCheck.message }; }
 
     // Check if system is completely full
-    const weekData = weekSheet.getDataRange().getValues();
-    weekData.shift(); // remove header
+    const weekDataRaw = weekSheet.getDataRange().getValues();
+    const weekData = weekDataRaw.slice(1);
     let totalSpotsRemaining = 0;
     weekData.forEach(row => {
         let empty = 0;
@@ -244,8 +316,8 @@ function processSelection(selectionData) {
         return { success: false, message: "Selection Complete: All available vacation slots are filled." };
     }
 
-    const turnHeaders = turnDataRaw.shift();
-    const turnData = turnDataRaw;
+    const turnHeaders = turnDataRaw[0];
+    const turnData = turnDataRaw.slice(1);
 
     const nameIdx = turnHeaders.indexOf('Name');
     const statusIdx = turnHeaders.indexOf('Status');
@@ -254,13 +326,17 @@ function processSelection(selectionData) {
     const lotPosIdx = turnHeaders.indexOf('LotteryPosition');
     const skipIdx = turnHeaders.indexOf('SkipNextTurn');
 
-    const userRowIndex = turnData.findIndex(row => row[nameIdx] === selectionData.name);
-    if (userRowIndex === -1) { return { success: false, message: "User not found." }; }
+    const queueWindow = calculateQueueWindow(turnDataRaw, currentRound);
+    const userObj = queueWindow.find(p => p.name === selectionData.name);
 
-    const userStatus = turnData[userRowIndex][statusIdx];
-    if (!['Active', 'Standby', 'Backup'].includes(userStatus)) {
+    if (!userObj) { return { success: false, message: "User not found." }; }
+
+    if (!['Active', 'Standby', 'Backup'].includes(userObj.computedStatus)) {
         return { success: false, message: "It is not your turn to make a selection." };
     }
+
+    // We also need the userRowIndex in the original turnData array
+    const userRowIndex = turnData.findIndex(row => row[nameIdx] === selectionData.name);
 
     if (!selectionData.week1) {
         return { success: false, message: "Missing primary week selection." };
@@ -284,6 +360,18 @@ function processSelection(selectionData) {
     let w1Data = weekData[w1Index];
     let w2Data = selectionData.week2 ? weekData[w2Index] : null;
 
+    // Validate classifications tightly on the backend before making any writes
+    const class1 = normalizeClassification(w1Data[1]);
+    const class2 = w2Data ? normalizeClassification(w2Data[1]) : null;
+
+    if (!class1 || (w2Data && !class2)) {
+        return { success: false, message: "Selected week has an invalid classification." };
+    }
+
+    if (w2Data && (class1 !== "Non-Prime" || class2 !== "Non-Prime")) {
+        return { success: false, message: "Two-week selections must both be Non-Prime." };
+    }
+
     // Check max capacity and existing spots
     let w1EmptySlots = 0;
     for (let i=2; i<=5; i++) { if (!w1Data[i]) w1EmptySlots++; }
@@ -299,12 +387,6 @@ function processSelection(selectionData) {
     for(let i=2; i<=5; i++){
         if (w1Data[i] === selectionData.name) return { success: false, message: "You are already booked for the primary week." };
         if (w2Data && w2Data[i] === selectionData.name) return { success: false, message: "You are already booked for the secondary week." };
-    }
-
-    if (selectionData.week2) {
-        if (w1Data[1] === 'Prime' || w2Data[1] === 'Prime') {
-            return { success: false, message: "Invalid selection. You cannot include a Prime week when selecting two weeks." };
-        }
     }
 
     // If validation passes, apply changes atomically.
@@ -353,91 +435,59 @@ function processSelection(selectionData) {
 
     // If we just filled the last spot in the whole sheet, clear queue and exit early
     if (totalSpotsRemaining === 0) {
-        let finalResetData = turnSheet.getDataRange().getValues();
-        finalResetData.shift();
-        finalResetData.forEach((row, index) => {
-            turnSheet.getRange(index + 2, statusIdx + 1).setValue('Waiting');
-        });
         return { success: true, message: "Selection recorded. Selection process is now complete." };
     }
 
-        // RE-EVALUATE QUEUE STATE (Deadlock fix for skips crossing boundaries)
+    // Since authorization relies on computed queue window and 'Completed' status,
+    // we don't strictly need to write 'Waiting', 'Active', etc. to the sheet anymore
+    // except for skips. Let's consume skips that fall within the *new* window.
+    // Wait, the rule says: "Consume skips only under the script lock during state transitions."
+    // If a person inside the new 3-person window has SkipNextTurn = true, we consume it and mark them Completed.
+
+    let loopGuard = 0;
     let nextRound = currentRound;
-    let filledSlots = 0;
-    const windowSlots = ['Active', 'Standby', 'Backup'];
-    let activatedUserIndices = [];
 
-    // Set everyone who is not 'Completed' to 'Waiting' to clear the current window
-    let resetTurnData = turnSheet.getDataRange().getValues();
-    resetTurnData.shift();
-    resetTurnData.forEach((row, index) => {
-        if (row[statusIdx] !== 'Completed') {
-            turnSheet.getRange(index + 2, statusIdx + 1).setValue('Waiting');
-        }
-    });
-
-    let loopGuard = 0; // Prevent infinite loops
-    while (filledSlots < 3 && loopGuard < 100) {
+    while (loopGuard < 100) {
         loopGuard++;
+        let currentTurnDataRaw = turnSheet.getDataRange().getValues();
+        let queueWindowData = calculateQueueWindow(currentTurnDataRaw, nextRound);
 
-        let currentTurnData = turnSheet.getDataRange().getValues();
-        currentTurnData.shift();
+        // Find if anyone in the new window (offset 0, 1, 2 from anchor) has skipNextTurn = true
+        let anchorIndex = queueWindowData.findIndex(person => person.status !== 'Completed');
 
-        // Check if the current round is completely over
-        let isRoundOver = currentTurnData.every(row => row[statusIdx] === 'Completed');
+        if (anchorIndex === -1) {
+             // Round is over
+             if (nextRound === 1) {
+                 return { success: true, message: "Selection recorded. Round 1 complete — awaiting lottery setup." };
+             } else {
+                 nextRound++;
+                 configSheet.getRange("B2").setValue(nextRound);
+                 let rows = turnSheet.getDataRange().getValues();
+                 rows.shift();
+                 rows.forEach((row, index) => {
+                     turnSheet.getRange(index + 2, statusIdx + 1).setValue('Waiting');
+                 });
+                 continue; // re-evaluate for the new round
+             }
+        }
 
-        if (isRoundOver) {
-            if (nextRound === 1) {
-                // Round 1 is complete. Administrator must run initializeLotteryRound().
-                return { success: true, message: "Selection recorded. Round 1 complete — awaiting lottery setup." };
-            } else {
-                // Advance to the next lottery round automatically
-                nextRound++;
-                configSheet.getRange("B2").setValue(nextRound);
-                currentTurnData.forEach((row, index) => {
-                    turnSheet.getRange(index + 2, statusIdx + 1).setValue('Waiting');
-                    currentTurnData[index][statusIdx] = 'Waiting';
-                });
+        let skippedSomeone = false;
+        for (let offset = 0; offset < 3; offset++) {
+            const personIndex = anchorIndex + offset;
+            if (personIndex < queueWindowData.length) {
+                let person = queueWindowData[personIndex];
+                if (person.status !== 'Completed' && person.skipNextTurn === true) {
+                    // Consume skip
+                    let originalDataRow = turnData.findIndex(row => row[nameIdx] === person.name);
+                    turnSheet.getRange(originalDataRow + 2, skipIdx + 1).setValue(false);
+                    turnSheet.getRange(originalDataRow + 2, statusIdx + 1).setValue('Completed');
+                    skippedSomeone = true;
+                }
             }
         }
 
-        // Find eligible candidates in this round
-        let eligibleUsers = [];
-        currentTurnData.forEach((row, index) => {
-            if (row[statusIdx] !== 'Completed' && !activatedUserIndices.includes(index + 2)) {
-                eligibleUsers.push({ data: row, originalIndex: index + 2 });
-            }
-        });
-
-        if (eligibleUsers.length === 0) {
-            // Should only happen if sheet is entirely full (caught earlier)
-            // or if it's the very last round ever and we just completed everyone.
-            break;
-        }
-
-        if (nextRound === 1) {
-            eligibleUsers.sort((a, b) => a.data[senPosIdx] - b.data[senPosIdx]);
-        } else {
-            const isEvenRound = nextRound % 2 === 0;
-            if (isEvenRound) { // Round 2, 4 -> Top-to-bottom
-                eligibleUsers.sort((a, b) => a.data[lotPosIdx] - b.data[lotPosIdx]);
-            } else { // Round 3, 5 -> Bottom-to-top
-                eligibleUsers.sort((a, b) => b.data[lotPosIdx] - a.data[lotPosIdx]);
-            }
-        }
-
-        let candidate = eligibleUsers[0]; // Evaluate top candidate
-
-        if (candidate.data[skipIdx] === true) {
-            // Consume skip and mark completed for this round
-            turnSheet.getRange(candidate.originalIndex, skipIdx + 1).setValue(false);
-            turnSheet.getRange(candidate.originalIndex, statusIdx + 1).setValue('Completed');
-            // We loop again immediately so we can re-check `isRoundOver`
-        } else {
-            // Not skipped, add to window
-            turnSheet.getRange(candidate.originalIndex, statusIdx + 1).setValue(windowSlots[filledSlots]);
-            activatedUserIndices.push(candidate.originalIndex);
-            filledSlots++;
+        if (!skippedSomeone) {
+            break; // stable state
         }
     }
 
@@ -447,4 +497,220 @@ function processSelection(selectionData) {
   } finally {
     lock.releaseLock();
   }
+}
+
+function testQueueWindowBehavior() {
+    // 1, 2, 3 Active
+    const headers = ['Name', 'PIN', 'SeniorityPosition', 'Status', 'WeeksSelected', 'LotteryPosition', 'SkipNextTurn'];
+    const turnDataRaw = [
+        headers,
+        ['Person1', '1234', 1, 'Waiting', 0, 1, false],
+        ['Person2', '1234', 2, 'Waiting', 0, 2, false],
+        ['Person3', '1234', 3, 'Waiting', 0, 3, false],
+        ['Person4', '1234', 4, 'Waiting', 0, 4, false],
+        ['Person5', '1234', 5, 'Waiting', 0, 5, false],
+    ];
+
+    let computed = calculateQueueWindow(turnDataRaw, 1);
+    if (computed[0].computedStatus !== 'Active' || computed[1].computedStatus !== 'Standby' || computed[2].computedStatus !== 'Backup') {
+        throw new Error("Initial window incorrect");
+    }
+    if (computed[3].computedStatus !== 'Waiting') throw new Error("Person 4 should be waiting");
+
+    // Person 2 completes
+    turnDataRaw[2][3] = 'Completed';
+    computed = calculateQueueWindow(turnDataRaw, 1);
+
+    if (computed[0].computedStatus !== 'Active') throw new Error("Person 1 should be Active");
+    if (computed[1].computedStatus !== 'Completed') throw new Error("Person 2 should be Completed");
+    if (computed[2].computedStatus !== 'Backup') throw new Error("Person 3 should be Backup");
+    if (computed[3].computedStatus !== 'Waiting') throw new Error("Person 4 should be Waiting");
+
+    // Person 1 completes
+    turnDataRaw[1][3] = 'Completed';
+    computed = calculateQueueWindow(turnDataRaw, 1);
+
+    if (computed[2].computedStatus !== 'Active') throw new Error("Person 3 should be Active");
+    if (computed[3].computedStatus !== 'Standby') throw new Error("Person 4 should be Standby");
+    if (computed[4].computedStatus !== 'Backup') throw new Error("Person 5 should be Backup");
+
+    console.log('PASS: testQueueWindowBehavior');
+}
+
+function testQueueWindowSkipNextTurn() {
+    const headers = ['Name', 'PIN', 'SeniorityPosition', 'Status', 'WeeksSelected', 'LotteryPosition', 'SkipNextTurn'];
+    const turnDataRaw = [
+        headers,
+        ['Person1', '1234', 1, 'Waiting', 0, 1, false],
+        ['Person2', '1234', 2, 'Waiting', 0, 2, true], // Skipping
+        ['Person3', '1234', 3, 'Waiting', 0, 3, false],
+        ['Person4', '1234', 4, 'Waiting', 0, 4, false],
+    ];
+
+    let computed = calculateQueueWindow(turnDataRaw, 1);
+    if (computed[0].computedStatus !== 'Active') throw new Error("Person 1 should be Active");
+    if (computed[1].computedStatus !== 'Waiting') throw new Error("Person 2 should be Waiting (skipped)");
+    if (computed[2].computedStatus !== 'Backup') throw new Error("Person 3 should be Backup");
+    if (computed[3].computedStatus !== 'Waiting') throw new Error("Person 4 should be Waiting (hole is left)");
+
+    console.log('PASS: testQueueWindowSkipNextTurn');
+}
+function runTests() {
+  testQueueWindowBehavior();
+  testQueueWindowSkipNextTurn();
+}
+
+function testRound1SelectableWeeks() {
+  const rows = [
+    [new Date('2026-06-01'), ' Prime ', '', '', '', '', 4],
+    [new Date('2026-10-05'), 'non-prime', '', '', '', '', 3]
+  ];
+
+  const weeks = buildAvailableWeekData(rows);
+
+  const primeCount = weeks.filter(
+    week => week.classification === 'Prime'
+  ).length;
+
+  const nonPrimeCount = weeks.filter(
+    week => week.classification === 'Non-Prime'
+  ).length;
+
+  if (primeCount !== 1) {
+    throw new Error('Expected one selectable Prime week.');
+  }
+
+  if (nonPrimeCount !== 1) {
+    throw new Error('Expected one selectable Non-Prime week.');
+  }
+
+  console.log('PASS: Round 1 includes Prime and Non-Prime options.');
+}
+
+function testInvalidClassification() {
+  const rows = [
+    [new Date('2026-06-01'), ' Prime ', '', '', '', '', 4],
+    [new Date('2026-10-05'), 'UnknownType', '', '', '', '', 3]
+  ];
+
+  const weeks = buildAvailableWeekData(rows);
+  const invalid = weeks.filter(w => w.classification === null);
+
+  if (invalid.length !== 1) {
+    throw new Error('Expected one invalid classification.');
+  }
+
+  console.log('PASS: Invalid classification properly detected.');
+}
+
+function runMoreTests() {
+  testRound1SelectableWeeks();
+  testInvalidClassification();
+}
+
+// ============================================================================
+// INTEGRATION TESTS
+// ============================================================================
+
+function setupMockSpreadsheet() {
+    // We create a temporary spreadsheet for true end-to-end testing
+    const ss = SpreadsheetApp.create('Temp Test SS - Vacation Selection');
+
+    const turnSheet = ss.insertSheet('Turn Management');
+    turnSheet.appendRow(['Name', 'PIN', 'SeniorityPosition', 'Status', 'WeeksSelected', 'LotteryPosition', 'SkipNextTurn']);
+    turnSheet.appendRow(['Person1', '1234', 1, 'Waiting', 0, 1, false]);
+    turnSheet.appendRow(['Person2', '1234', 2, 'Waiting', 0, 2, false]);
+    turnSheet.appendRow(['Person3', '1234', 3, 'Waiting', 0, 3, false]);
+    turnSheet.appendRow(['Person4', '1234', 4, 'Waiting', 0, 4, false]);
+    turnSheet.appendRow(['Person5', '1234', 5, 'Waiting', 0, 5, false]);
+
+    const weekSheet = ss.insertSheet('Week Availability');
+    weekSheet.appendRow(['StartDate', 'Classification', 'P1', 'P2', 'P3', 'P4', 'SpotsRemaining']);
+    weekSheet.appendRow([new Date('2026-06-01'), 'Prime', '', '', '', '', 4]);
+    weekSheet.appendRow([new Date('2026-10-05'), 'Non-Prime', '', '', '', '', 4]);
+    weekSheet.appendRow([new Date('2026-11-02'), 'Non-Prime', '', '', '', '', 4]);
+    weekSheet.appendRow([new Date('2026-12-07'), 'UnknownType', '', '', '', '', 4]);
+
+    const configSheet = ss.insertSheet('Config');
+    configSheet.getRange('A2').setValue('CurrentRound');
+    configSheet.getRange('B2').setValue(1);
+
+    // Delete the default 'Sheet1'
+    const sheet1 = ss.getSheetByName('Sheet1');
+    if (sheet1) ss.deleteSheet(sheet1);
+
+    return ss;
+}
+
+function runIntegrationTests() {
+    console.log("Running Integration Tests...");
+
+    let ss;
+    try {
+        ss = setupMockSpreadsheet();
+        // Temporarily override SpreadsheetApp.getActiveSpreadsheet to return our temp sheet
+        const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
+        SpreadsheetApp.getActiveSpreadsheet = () => ss;
+
+        try {
+            // TEST 1: Person 4 rejected initially
+            let res = processSelection({ name: 'Person4', week1: ss.getSheetByName('Week Availability').getRange(2, 1).getValue().getTime() });
+            if (res.success) throw new Error("Person 4 should have been rejected (outside window).");
+            console.log("PASS: Person 4 rejected initially.");
+
+            // TEST 2: Person 2 can select while Person 1 unfinished
+            let weekTime2 = ss.getSheetByName('Week Availability').getRange(3, 1).getValue().getTime();
+            res = processSelection({ name: 'Person2', week1: weekTime2 });
+            if (!res.success) throw new Error("Person 2 should succeed.");
+            console.log("PASS: Person 2 selected while Person 1 is unfinished.");
+
+            // TEST 3: Person 4 STILL rejected
+            res = processSelection({ name: 'Person4', week1: ss.getSheetByName('Week Availability').getRange(2, 1).getValue().getTime() });
+            if (res.success) throw new Error("Person 4 should STILL be rejected (window anchored at Person 1).");
+            console.log("PASS: Person 4 remains rejected because window is 1, 3, 4 (2 is completed). Wait... 1, 3, 4 is the window? No. 1, 2, 3 is the original window. 2 is completed. The permitted window consists of the anchor and the next TWO positions. So anchor=1, offset=0 (1), offset=1 (2-completed), offset=2 (3). So Person 4 is still offset 3, thus outside the window!");
+
+            // TEST 4: Person 1 submits
+            res = processSelection({ name: 'Person1', week1: ss.getSheetByName('Week Availability').getRange(2, 1).getValue().getTime() });
+            if (!res.success) throw new Error("Person 1 should succeed.");
+            console.log("PASS: Person 1 selected. Anchor should move to 3.");
+
+            // TEST 5: Person 4 now accepted (Anchor=3, window=3,4,5)
+            res = processSelection({ name: 'Person4', week1: ss.getSheetByName('Week Availability').getRange(2, 1).getValue().getTime() });
+            if (!res.success) throw new Error("Person 4 should succeed now that anchor moved to 3.");
+            console.log("PASS: Person 4 accepted in new window.");
+
+            // TEST 6: Invalid Classification Request Rejected
+            let invalidTime = ss.getSheetByName('Week Availability').getRange(5, 1).getValue().getTime();
+            res = processSelection({ name: 'Person3', week1: invalidTime });
+            if (res.success) throw new Error("Person 3 selecting invalid classification should fail.");
+            console.log("PASS: Invalid classification rejected.");
+
+            // TEST 7: Descending Lottery Round
+            ss.getSheetByName('Config').getRange('B2').setValue(3); // Round 3 is descending
+            // Reset statuses to Waiting
+            let turnSheet = ss.getSheetByName('Turn Management');
+            for(let i=2; i<=6; i++) turnSheet.getRange(i, 4).setValue('Waiting');
+
+            // Queue should be: Person5 (anchor), Person4, Person3, Person2, Person1
+            // Person 2 should fail initially
+            res = processSelection({ name: 'Person2', week1: weekTime2 });
+            if (res.success) throw new Error("Person 2 should be rejected in descending round 3 (window is 5,4,3).");
+            console.log("PASS: Descending round window calculation correct.");
+
+        } finally {
+            // Restore SpreadsheetApp
+            SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
+        }
+    } catch(e) {
+        console.error("Integration test failed:", e.message);
+        throw e;
+    } finally {
+        if (ss) {
+            // Clean up temporary spreadsheet
+            const files = DriveApp.getFilesByName(ss.getName());
+            while (files.hasNext()) {
+                files.next().setTrashed(true);
+            }
+        }
+    }
 }
