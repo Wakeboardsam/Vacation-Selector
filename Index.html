@@ -251,14 +251,41 @@
       function displayPublicCalendar(data) {
         const statusDiv = document.getElementById("public-status-container");
         let statusHtml = '<ul class="status-list">';
-        const activeUsers = data.turnQueue.filter(p => ['Active', 'Standby', 'Backup'].includes(p.status)).sort((a,b)=>a.queuePosition-b.queuePosition);
-        const nextUpUsers = data.turnQueue.filter(p => p.status === 'Waiting').sort((a,b)=>a.queuePosition-b.queuePosition).slice(0, 10);
-        statusHtml += `<li><b>Current Window:</b></li>`;
-        activeUsers.forEach(p => { statusHtml += `<li>${p.status === 'Active' ? '🟢' : '🟡'} ${p.name} (#${p.queuePosition})</li>`; });
-        statusHtml += `<li style="margin-top:10px;"><b>Next Up:</b></li>`;
-        nextUpUsers.forEach(p => { statusHtml += `<li>${p.name} (#${p.queuePosition})</li>`; });
-        statusHtml += `</ul>`;
-        statusDiv.innerHTML += statusHtml;
+
+        let allFull = true;
+        data.calendarData.forEach(w => {
+           if (w.spotsRemaining > 0) allFull = false;
+        });
+
+        if (allFull || data.calendarData.length === 0) {
+            statusDiv.innerHTML = `<h2>Current Status</h2><p><b>Selection Complete:</b> All available vacation slots have been filled.</p>`;
+        } else {
+            let activeUsers = data.turnQueue.filter(p => ['Active', 'Standby', 'Backup'].includes(p.status));
+            let nextUpUsers = data.turnQueue.filter(p => p.status === 'Waiting');
+
+            if (data.currentRound === 1) {
+                activeUsers.sort((a,b) => a.queuePosition - b.queuePosition);
+                nextUpUsers.sort((a,b) => a.queuePosition - b.queuePosition);
+            } else {
+                const isEvenRound = data.currentRound % 2 === 0;
+                if (isEvenRound) {
+                    activeUsers.sort((a,b) => a.queuePosition - b.queuePosition);
+                    nextUpUsers.sort((a,b) => a.queuePosition - b.queuePosition);
+                } else {
+                    activeUsers.sort((a,b) => b.queuePosition - a.queuePosition);
+                    nextUpUsers.sort((a,b) => b.queuePosition - a.queuePosition);
+                }
+            }
+
+            nextUpUsers = nextUpUsers.slice(0, 10);
+
+            statusHtml += `<li><b>Current Window (Round ${data.currentRound}):</b></li>`;
+            activeUsers.forEach(p => { statusHtml += `<li>${p.status === 'Active' ? '🟢' : '🟡'} ${p.name} (#${p.queuePosition})</li>`; });
+            statusHtml += `<li style="margin-top:10px;"><b>Next Up:</b></li>`;
+            nextUpUsers.forEach(p => { statusHtml += `<li>${p.name} (#${p.queuePosition})</li>`; });
+            statusHtml += `</ul>`;
+            statusDiv.innerHTML += statusHtml;
+        }
 
         const tbody = document.querySelector("#calendar-table tbody");
         tbody.innerHTML = '';
@@ -325,49 +352,97 @@
 
       function displayDashboard(data) {
         const container = document.getElementById('dashboard-container');
+
+        let allFull = true;
+        data.availableWeeks.forEach(w => {
+           if (w.spotsRemaining > 0) allFull = false;
+        });
+
+        if (allFull || data.availableWeeks.length === 0) {
+            container.innerHTML = `<div id="dashboard-content"><h2>Welcome, ${data.currentUser.name}</h2><h3>Selection Complete</h3><p>All vacation slots have been filled. The process is now complete.</p></div>`;
+            return;
+        }
+
         let html = `<div id="dashboard-content"><h2>Welcome, ${data.currentUser.name}</h2><h3>Current Status</h3><ul class="status-list" style="list-style-type:none;padding:0;">`;
-        const activeUsers = data.turnQueue.filter(p => ['Active', 'Standby', 'Backup'].includes(p.status)).sort((a,b)=>a.queuePosition-b.queuePosition);
-        const nextUpUsers = data.turnQueue.filter(p => p.status === 'Waiting').sort((a,b)=>a.queuePosition-b.queuePosition).slice(0, 10);
+
+        let activeUsers = data.turnQueue.filter(p => ['Active', 'Standby', 'Backup'].includes(p.status));
+        let nextUpUsers = data.turnQueue.filter(p => p.status === 'Waiting');
+
+        // Sort identically to backend logic
+        if (data.currentRound === 1) {
+            activeUsers.sort((a,b) => a.queuePosition - b.queuePosition);
+            nextUpUsers.sort((a,b) => a.queuePosition - b.queuePosition);
+        } else {
+            const isEvenRound = data.currentRound % 2 === 0;
+            if (isEvenRound) {
+                activeUsers.sort((a,b) => a.queuePosition - b.queuePosition);
+                nextUpUsers.sort((a,b) => a.queuePosition - b.queuePosition);
+            } else {
+                activeUsers.sort((a,b) => b.queuePosition - a.queuePosition);
+                nextUpUsers.sort((a,b) => b.queuePosition - a.queuePosition);
+            }
+        }
+
+        nextUpUsers = nextUpUsers.slice(0, 10);
+
         html += `<li><b>Current Window (Round ${data.currentRound}):</b></li>`;
         activeUsers.forEach(p => { html += `<li>${p.status === 'Active' ? '🟢' : '🟡'} ${p.name} (#${p.queuePosition})</li>`; });
         html += `<li style="margin-top:10px;"><b>Next Up:</b></li>`;
         nextUpUsers.forEach(p => { html += `<li>${p.name} (#${p.queuePosition})</li>`; });
         html += `</ul><div id="selection-area"></div></div>`;
         container.innerHTML = html;
+
         const canUserSelect = ['Active', 'Standby', 'Backup'].includes(data.currentUser.status);
         if (canUserSelect) {
-          const isEvenRound = data.currentRound % 2 === 0;
-          if(isEvenRound) {
-            const highestPositionInWindow = Math.max(...activeUsers.map(p => p.queuePosition));
-            if (data.currentUser.queuePosition >= highestPositionInWindow - 2) {
-              buildSelectionForm(data.availableWeeks);
-            } else {
-              document.getElementById("selection-area").innerHTML = `<p><b>You are in the selection window!</b> However, to be fair, please wait for #${highestPositionInWindow} to make their selection before you choose.</p>`;
-            }
-          } else {
-            const lowestPositionInWindow = Math.min(...activeUsers.map(p => p.queuePosition));
-            if (data.currentUser.queuePosition <= lowestPositionInWindow + 2) {
-              buildSelectionForm(data.availableWeeks);
-            } else {
-              document.getElementById("selection-area").innerHTML = `<p><b>You are in the selection window!</b> However, to be fair, please wait for #${lowestPositionInWindow} to make their selection before you choose.</p>`;
-            }
-          }
+            buildSelectionForm(data.availableWeeks, data.currentRound);
         } else {
           document.getElementById("selection-area").innerHTML = `<p>It is not your turn to make a selection.</p>`;
         }
       }
 
-      function buildSelectionForm(weeks) {
+      function buildSelectionForm(weeks, currentRound) {
         const formDiv = document.getElementById("selection-area");
         const primeWeeks = weeks.filter(w => w.classification === 'Prime');
         const nonPrimeWeeks = weeks.filter(w => w.classification === 'Non-Prime');
-        let formHTML = `<h3>Your Turn to Select!</h3><p><b>Rule Reminder:</b> Select one Prime week OR one/two Non-Prime weeks.</p><label for="week1">Primary Week Selection:</label><select id="week1" style="width:100%"><option selected disabled>-- Choose a week --</option><optgroup label="Prime Weeks">${primeWeeks.map(w => `<option value="${w.valueDate}">${w.displayDate} (${w.spotsRemaining} spots left)</option>`).join('')}</optgroup><optgroup label="Non-Prime Weeks">${nonPrimeWeeks.map(w => `<option value="${w.valueDate}">${w.displayDate} (${w.spotsRemaining} spots left)</option>`).join('')}</optgroup></select><label for="week2">Additional Non-Prime Week (optional):</label><select id="week2" style="width:100%"><option value="" selected>-- No second week --</option>${nonPrimeWeeks.map(w => `<option value="${w.valueDate}">${w.displayDate} (${w.spotsRemaining} spots left)</option>`).join('')}</select><button onclick="submitSelection()" style="width:100%">Submit Selection</button>`;
+
+        let formHTML = `<h3>Your Turn to Select!</h3>`;
+        if (currentRound === 1) {
+            formHTML += `<p><b>Rule Reminder:</b> Round 1 allows for exactly ONE week selection only (Prime or Non-Prime).</p>`;
+        } else {
+            formHTML += `<p><b>Rule Reminder:</b> Select one Prime week OR one/two Non-Prime weeks.</p>`;
+        }
+
+        formHTML += `<label for="week1">Primary Week Selection:</label><select id="week1" style="width:100%" onchange="handleWeek1Change(this, ${currentRound})"><option selected disabled>-- Choose a week --</option><optgroup label="Prime Weeks">${primeWeeks.map(w => `<option value="${w.valueDate}" data-type="Prime">${w.displayDate} (${w.spotsRemaining} spots left)</option>`).join('')}</optgroup><optgroup label="Non-Prime Weeks">${nonPrimeWeeks.map(w => `<option value="${w.valueDate}" data-type="Non-Prime">${w.displayDate} (${w.spotsRemaining} spots left)</option>`).join('')}</optgroup></select>`;
+
+        if (currentRound !== 1) {
+            formHTML += `<label for="week2">Additional Non-Prime Week (optional):</label><select id="week2" style="width:100%"><option value="" selected>-- No second week --</option>${nonPrimeWeeks.map(w => `<option value="${w.valueDate}">${w.displayDate} (${w.spotsRemaining} spots left)</option>`).join('')}</select>`;
+            formHTML += `<p id="week2-warning" style="color: #854d0e; font-size: 0.9em; display: none;"><i>Warning: Choosing a second non-prime week will forfeit your next scheduled turn.</i></p>`;
+        }
+
+        formHTML += `<button onclick="submitSelection()" style="width:100%">Submit Selection</button>`;
         formDiv.innerHTML += formHTML;
       }
       
+      function handleWeek1Change(selectElement, currentRound) {
+          if (currentRound === 1) return; // Second week isn't shown anyway
+          const selectedOption = selectElement.options[selectElement.selectedIndex];
+          const weekType = selectedOption.getAttribute('data-type');
+          const week2Select = document.getElementById('week2');
+          const warningText = document.getElementById('week2-warning');
+
+          if (weekType === 'Prime') {
+              week2Select.value = "";
+              week2Select.disabled = true;
+              warningText.style.display = 'none';
+          } else {
+              week2Select.disabled = false;
+              warningText.style.display = 'block';
+          }
+      }
       function submitSelection() {
         const week1 = document.getElementById("week1").value;
-        const week2 = document.getElementById("week2").value;
+        const week2Element = document.getElementById("week2");
+        const week2 = week2Element ? week2Element.value : "";
         const name = document.querySelector("#dashboard-content h2").textContent.replace("Welcome, ", "");
         if (document.getElementById("week1").selectedIndex === 0) {
           alert("Please select your primary week.");
@@ -391,6 +466,7 @@
           })
           .processSelection(selectionData);
       }
+
     </script>
   </body>
 </html>
