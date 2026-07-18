@@ -1,0 +1,125 @@
+<<<<<<< SEARCH
+function getParticipantNames() {
+=======
+function setupThemeColorsSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName('Theme Colors');
+
+  if (sheet) {
+    return "Theme Colors tab already exists. Will not overwrite.";
+  }
+
+  sheet = ss.insertSheet('Theme Colors');
+
+  // Setup headers
+  const headers = ['Color Role', 'CSS Variable', 'Boring', 'Anesthesia', 'Ketamine'];
+  sheet.appendRow(headers);
+  sheet.setFrozenRows(1);
+
+  const headerRange = sheet.getRange(1, 1, 1, headers.length);
+  headerRange.setFontWeight('bold');
+  headerRange.setBackground('#f3f4f6');
+
+  // Populate default variables
+  const rows = [];
+  ALLOWED_THEME_VARIABLES.forEach(cssVar => {
+    const role = THEME_ROLE_LABELS[cssVar] || cssVar;
+    const boringColor = THEME_COLOR_DEFAULTS.boring[cssVar] || '';
+    const anesthesiaColor = THEME_COLOR_DEFAULTS.anesthesia[cssVar] || '';
+    const ketamineColor = THEME_COLOR_DEFAULTS.ketamine[cssVar] || '';
+
+    rows.push([role, cssVar, boringColor, anesthesiaColor, ketamineColor]);
+  });
+
+  if (rows.length > 0) {
+    sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
+  }
+
+  // Adjust column widths
+  sheet.autoResizeColumn(1);
+  sheet.autoResizeColumn(2);
+  sheet.setColumnWidths(3, 3, 120);
+
+  // Apply warning-only protection to Columns A and B
+  const protectionA = sheet.getRange("A:A").protect().setDescription("Theme role identifiers are managed by the vacation-selection app.");
+  protectionA.setWarningOnly(true);
+
+  const protectionB = sheet.getRange("B:B").protect().setDescription("CSS-variable identifiers are managed by the vacation-selection app.");
+  protectionB.setWarningOnly(true);
+
+  // Refresh formatting to apply swatches
+  refreshThemeColorSwatches();
+
+  return "Theme Colors tab created and populated successfully.";
+}
+
+function refreshThemeColorSwatches() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName('Theme Colors');
+  if (!sheet) return "Theme Colors tab not found.";
+
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 2) return "No data to refresh.";
+
+  const headers = data[0].map(h => String(h || '').trim().toLowerCase());
+
+  const themeColumns = [
+    headers.indexOf('boring'),
+    headers.indexOf('anesthesia'),
+    headers.indexOf('ketamine')
+  ];
+
+  const backgrounds = sheet.getDataRange().getBackgrounds();
+  const fontColors = sheet.getDataRange().getFontColors();
+  const fontWeights = sheet.getDataRange().getFontWeights();
+  const fontStyles = sheet.getDataRange().getFontStyles();
+
+  let changesMade = false;
+
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+
+    themeColumns.forEach(colIdx => {
+      if (colIdx !== -1 && colIdx < row.length) {
+        const rawValue = String(row[colIdx] || '');
+        const validColor = validateHexColor(rawValue);
+
+        if (validColor) {
+          // Valid color: set background and contrast text
+          backgrounds[i][colIdx] = validColor;
+          fontColors[i][colIdx] = getContrastTextColor(validColor);
+          fontWeights[i][colIdx] = 'bold';
+          fontStyles[i][colIdx] = 'normal';
+          changesMade = true;
+        } else if (rawValue.trim() !== '') {
+          // Invalid color: neutral warning format
+          backgrounds[i][colIdx] = '#ffffff';
+          fontColors[i][colIdx] = '#dc2626'; // Red text for error
+          fontWeights[i][colIdx] = 'bold';
+          fontStyles[i][colIdx] = 'italic';
+          changesMade = true;
+        } else {
+          // Blank
+          backgrounds[i][colIdx] = '#ffffff';
+          fontColors[i][colIdx] = '#000000';
+          fontWeights[i][colIdx] = 'normal';
+          fontStyles[i][colIdx] = 'normal';
+          changesMade = true;
+        }
+      }
+    });
+  }
+
+  if (changesMade) {
+    const dataRange = sheet.getDataRange();
+    dataRange.setBackgrounds(backgrounds);
+    dataRange.setFontColors(fontColors);
+    dataRange.setFontWeights(fontWeights);
+    dataRange.setFontStyles(fontStyles);
+  }
+
+  return "Theme color swatches refreshed.";
+}
+
+function getParticipantNames() {
+>>>>>>> REPLACE

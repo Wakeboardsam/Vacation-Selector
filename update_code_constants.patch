@@ -1,0 +1,100 @@
+<<<<<<< SEARCH
+function include(filename) {
+  return HtmlService.createHtmlOutputFromFile(filename).getContent();
+}
+
+function doGet(e) {
+=======
+// Theme color configuration constants
+const ALLOWED_THEME_VARIABLES = [
+  '--bg-color', '--surface-main', '--text-primary', '--text-secondary',
+  '--accent-color', '--accent-hover', '--prime-tint', '--prime-text',
+  '--available-tint', '--available-text', '--limited-tint', '--limited-text',
+  '--full-tint', '--full-text', '--disabled-bg', '--disabled-text', '--skeleton-bg'
+];
+
+// Fallback configuration
+const THEME_COLOR_DEFAULTS = {
+  boring: {
+    '--bg-color': '#F6F7FA', '--surface-main': '#FFFFFF', '--text-primary': '#171A22',
+    '--text-secondary': '#6B7280', '--accent-color': '#5267E8', '--accent-hover': '#4052BF',
+    '--prime-tint': '#FFF3D6', '--prime-text': '#92400E', '--available-tint': '#EAF8F0',
+    '--available-text': '#166534', '--limited-tint': '#FFF4E5', '--limited-text': '#9A3412',
+    '--full-tint': '#FDECEC', '--full-text': '#B91C1C', '--disabled-bg': '#E5E7EB',
+    '--disabled-text': '#9CA3AF', '--skeleton-bg': '#E2E8F0'
+  },
+  anesthesia: {
+    '--bg-color': '#E6F3F7', '--surface-main': '#FFFFFF', '--text-primary': '#1B2C33',
+    '--text-secondary': '#566E7A', '--accent-color': '#039BE5', '--accent-hover': '#0277BD',
+    '--prime-tint': '#FFF59D', '--prime-text': '#F57F17', '--available-tint': '#A5D6A7',
+    '--available-text': '#1B5E20', '--limited-tint': '#FFCC80', '--limited-text': '#E65100',
+    '--full-tint': '#EF9A9A', '--full-text': '#B71C1C', '--disabled-bg': '#CFD8DC',
+    '--disabled-text': '#78909C', '--skeleton-bg': '#B0BEC5'
+  },
+  ketamine: {
+    '--bg-color': '#1A0B2E', '--surface-main': '#2A1149', '--text-primary': '#E0E0E0',
+    '--text-secondary': '#BDBDBD', '--accent-color': '#D500F9', '--accent-hover': '#AA00FF',
+    '--prime-tint': '#C6FF00', '--prime-text': '#000000', '--available-tint': '#00E5FF',
+    '--available-text': '#000000', '--limited-tint': '#FF3D00', '--limited-text': '#000000',
+    '--full-tint': '#FF1744', '--full-text': '#000000', '--disabled-bg': '#4A148C',
+    '--disabled-text': '#9C27B0', '--skeleton-bg': '#7B1FA2'
+  }
+};
+
+const THEME_ROLE_LABELS = {
+  '--bg-color': 'Page Background', '--surface-main': 'Card Surface',
+  '--text-primary': 'Primary Text', '--text-secondary': 'Secondary Text',
+  '--accent-color': 'Primary Accent', '--accent-hover': 'Accent Hover',
+  '--prime-tint': 'Prime Background', '--prime-text': 'Prime Text',
+  '--available-tint': 'Available Background', '--available-text': 'Available Text',
+  '--limited-tint': 'Limited Background', '--limited-text': 'Limited Text',
+  '--full-tint': 'Full Background', '--full-text': 'Full Text',
+  '--disabled-bg': 'Disabled Background', '--disabled-text': 'Disabled Text',
+  '--skeleton-bg': 'Loading Skeleton'
+};
+
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu('Vacation Admin')
+    .addItem('Set Up Theme Colors', 'setupThemeColorsSheet')
+    .addItem('Refresh Theme Swatches', 'refreshThemeColorSwatches')
+    .addToUi();
+}
+
+/** Validates string strictly against #RRGGBB format */
+function validateHexColor(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  const match = trimmed.match(/^#([0-9a-fA-F]{6})$/);
+  if (!match) return null;
+  return trimmed.toUpperCase();
+}
+
+/** Gets best text color (black or white) for given valid #RRGGBB hex background using WCAG luminance */
+function getContrastTextColor(hexColor) {
+  if (!hexColor || !hexColor.startsWith('#')) return '#000000';
+
+  const r = parseInt(hexColor.substr(1, 2), 16) / 255;
+  const g = parseInt(hexColor.substr(3, 2), 16) / 255;
+  const b = parseInt(hexColor.substr(5, 2), 16) / 255;
+
+  const linearize = (c) => c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  const R = linearize(r);
+  const G = linearize(g);
+  const B = linearize(b);
+
+  const L = 0.2126 * R + 0.7152 * G + 0.0722 * B;
+
+  // Lw (white) = 1.0, Lb (black) = 0.0
+  const crWhite = 1.05 / (L + 0.05);
+  const crBlack = (L + 0.05) / 0.05;
+
+  return crWhite > crBlack ? '#FFFFFF' : '#000000';
+}
+
+function include(filename) {
+  return HtmlService.createHtmlOutputFromFile(filename).getContent();
+}
+
+function doGet(e) {
+>>>>>>> REPLACE

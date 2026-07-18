@@ -1,11 +1,103 @@
 // Final complete Code.gs file - Adds turn data to public view
 
+// Theme color configuration constants
+const ALLOWED_THEME_VARIABLES = [
+  '--bg-color', '--surface-main', '--text-primary', '--text-secondary',
+  '--accent-color', '--accent-hover', '--prime-tint', '--prime-text',
+  '--available-tint', '--available-text', '--limited-tint', '--limited-text',
+  '--full-tint', '--full-text', '--disabled-bg', '--disabled-text', '--skeleton-bg'
+];
+
+// Fallback configuration
+const THEME_COLOR_DEFAULTS = {
+  boring: {
+    '--bg-color': '#F6F7FA', '--surface-main': '#FFFFFF', '--text-primary': '#171A22',
+    '--text-secondary': '#6B7280', '--accent-color': '#5267E8', '--accent-hover': '#4052BF',
+    '--prime-tint': '#FFF3D6', '--prime-text': '#92400E', '--available-tint': '#EAF8F0',
+    '--available-text': '#166534', '--limited-tint': '#FFF4E5', '--limited-text': '#9A3412',
+    '--full-tint': '#FDECEC', '--full-text': '#B91C1C', '--disabled-bg': '#E5E7EB',
+    '--disabled-text': '#9CA3AF', '--skeleton-bg': '#E2E8F0'
+  },
+  anesthesia: {
+    '--bg-color': '#E6F3F7', '--surface-main': '#FFFFFF', '--text-primary': '#1B2C33',
+    '--text-secondary': '#566E7A', '--accent-color': '#039BE5', '--accent-hover': '#0277BD',
+    '--prime-tint': '#FFF59D', '--prime-text': '#F57F17', '--available-tint': '#A5D6A7',
+    '--available-text': '#1B5E20', '--limited-tint': '#FFCC80', '--limited-text': '#E65100',
+    '--full-tint': '#EF9A9A', '--full-text': '#B71C1C', '--disabled-bg': '#CFD8DC',
+    '--disabled-text': '#78909C', '--skeleton-bg': '#B0BEC5'
+  },
+  ketamine: {
+    '--bg-color': '#1A0B2E', '--surface-main': '#2A1149', '--text-primary': '#E0E0E0',
+    '--text-secondary': '#BDBDBD', '--accent-color': '#D500F9', '--accent-hover': '#AA00FF',
+    '--prime-tint': '#C6FF00', '--prime-text': '#000000', '--available-tint': '#00E5FF',
+    '--available-text': '#000000', '--limited-tint': '#FF3D00', '--limited-text': '#000000',
+    '--full-tint': '#FF1744', '--full-text': '#000000', '--disabled-bg': '#4A148C',
+    '--disabled-text': '#9C27B0', '--skeleton-bg': '#7B1FA2'
+  }
+};
+
+const THEME_ROLE_LABELS = {
+  '--bg-color': 'Page Background', '--surface-main': 'Card Surface',
+  '--text-primary': 'Primary Text', '--text-secondary': 'Secondary Text',
+  '--accent-color': 'Primary Accent', '--accent-hover': 'Accent Hover',
+  '--prime-tint': 'Prime Background', '--prime-text': 'Prime Text',
+  '--available-tint': 'Available Background', '--available-text': 'Available Text',
+  '--limited-tint': 'Limited Background', '--limited-text': 'Limited Text',
+  '--full-tint': 'Full Background', '--full-text': 'Full Text',
+  '--disabled-bg': 'Disabled Background', '--disabled-text': 'Disabled Text',
+  '--skeleton-bg': 'Loading Skeleton'
+};
+
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu('Vacation Admin')
+    .addItem('Set Up Theme Colors', 'setupThemeColorsSheet')
+    .addItem('Refresh Theme Swatches', 'refreshThemeColorSwatches')
+    .addToUi();
+}
+
+/** Validates string strictly against #RRGGBB format */
+function validateHexColor(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  const match = trimmed.match(/^#([0-9a-fA-F]{6})$/);
+  if (!match) return null;
+  return trimmed.toUpperCase();
+}
+
+/** Gets best text color (black or white) for given valid #RRGGBB hex background using WCAG luminance */
+function getContrastTextColor(hexColor) {
+  if (!hexColor || !hexColor.startsWith('#')) return '#000000';
+
+  const r = parseInt(hexColor.substr(1, 2), 16) / 255;
+  const g = parseInt(hexColor.substr(3, 2), 16) / 255;
+  const b = parseInt(hexColor.substr(5, 2), 16) / 255;
+
+  const linearize = (c) => c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  const R = linearize(r);
+  const G = linearize(g);
+  const B = linearize(b);
+
+  const L = 0.2126 * R + 0.7152 * G + 0.0722 * B;
+
+  // Lw (white) = 1.0, Lb (black) = 0.0
+  const crWhite = 1.05 / (L + 0.05);
+  const crBlack = (L + 0.05) / 0.05;
+
+  return crWhite > crBlack ? '#FFFFFF' : '#000000';
+}
+
 function include(filename) {
   return HtmlService.createHtmlOutputFromFile(filename).getContent();
 }
 
 function doGet(e) {
-  return HtmlService.createTemplateFromFile('Index')
+  const template = HtmlService.createTemplateFromFile('Index');
+
+  const themeConfig = getThemeColorConfig();
+  template.themeOverridesCss = buildThemeOverridesCss(themeConfig);
+
+  return template
     .evaluate()
     .setTitle('Vacation Week Selection System')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
@@ -36,6 +128,205 @@ function buildAvailableWeekData(rows) {
       spotsRemaining: Number(row[6]),
       originalClassification: row[1]
     }));
+}
+
+function getThemeColorConfig() {
+  const config = {
+    boring: { ...THEME_COLOR_DEFAULTS.boring },
+    anesthesia: { ...THEME_COLOR_DEFAULTS.anesthesia },
+    ketamine: { ...THEME_COLOR_DEFAULTS.ketamine }
+  };
+
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName('Theme Colors');
+    if (!sheet) return config;
+
+    const data = sheet.getDataRange().getValues();
+    if (data.length === 0) return config;
+
+    const headers = data[0].map(h => String(h || '').trim().toLowerCase());
+
+    // Find column indexes for each theme based on header name
+    const themeColumns = {
+      boring: headers.indexOf('boring'),
+      anesthesia: headers.indexOf('anesthesia'),
+      ketamine: headers.indexOf('ketamine')
+    };
+
+    // Track which variables have been processed to ignore duplicates
+    const processedVariables = new Set();
+
+    for (let i = 1; i < data.length; i++) {
+      const row = data[i];
+      const cssVarRaw = String(row[1] || '').trim();
+
+      // Ignore unknown variables or duplicates
+      if (!ALLOWED_THEME_VARIABLES.includes(cssVarRaw) || processedVariables.has(cssVarRaw)) {
+        continue;
+      }
+      processedVariables.add(cssVarRaw);
+
+      // Extract colors for each theme
+      ['boring', 'anesthesia', 'ketamine'].forEach(theme => {
+        const colIdx = themeColumns[theme];
+        if (colIdx !== -1 && colIdx < row.length) {
+          const validColor = validateHexColor(row[colIdx]);
+          if (validColor) {
+            config[theme][cssVarRaw] = validColor;
+          }
+        }
+      });
+    }
+
+  } catch (e) {
+    console.error("Failed to read theme colors:", e);
+    // On error, fall back to default
+  }
+
+  return config;
+}
+
+function buildThemeOverridesCss(themeConfig) {
+  let css = '';
+  const themes = ['boring', 'anesthesia', 'ketamine'];
+
+  themes.forEach(theme => {
+    // Determine the selector format based on existing CSS
+    const selector = theme === 'boring' ? 'html[data-theme="boring"]' : `html[data-theme="${theme}"]`;
+    css += `${selector} {\n`;
+
+    ALLOWED_THEME_VARIABLES.forEach(cssVar => {
+      const val = themeConfig[theme][cssVar];
+      if (val) {
+        css += `  ${cssVar}: ${val};\n`;
+      }
+    });
+
+    css += `}\n\n`;
+  });
+
+  return css;
+}
+
+function setupThemeColorsSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName('Theme Colors');
+
+  if (sheet) {
+    return "Theme Colors tab already exists. Will not overwrite.";
+  }
+
+  sheet = ss.insertSheet('Theme Colors');
+
+  // Setup headers
+  const headers = ['Color Role', 'CSS Variable', 'Boring', 'Anesthesia', 'Ketamine'];
+  sheet.appendRow(headers);
+  sheet.setFrozenRows(1);
+
+  const headerRange = sheet.getRange(1, 1, 1, headers.length);
+  headerRange.setFontWeight('bold');
+  headerRange.setBackground('#f3f4f6');
+
+  // Populate default variables
+  const rows = [];
+  ALLOWED_THEME_VARIABLES.forEach(cssVar => {
+    const role = THEME_ROLE_LABELS[cssVar] || cssVar;
+    const boringColor = THEME_COLOR_DEFAULTS.boring[cssVar] || '';
+    const anesthesiaColor = THEME_COLOR_DEFAULTS.anesthesia[cssVar] || '';
+    const ketamineColor = THEME_COLOR_DEFAULTS.ketamine[cssVar] || '';
+
+    rows.push([role, cssVar, boringColor, anesthesiaColor, ketamineColor]);
+  });
+
+  if (rows.length > 0) {
+    sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
+  }
+
+  // Adjust column widths
+  sheet.autoResizeColumn(1);
+  sheet.autoResizeColumn(2);
+  sheet.setColumnWidths(3, 3, 120);
+
+  // Apply warning-only protection to Columns A and B
+  const protectionA = sheet.getRange("A:A").protect().setDescription("Theme role identifiers are managed by the vacation-selection app.");
+  protectionA.setWarningOnly(true);
+
+  const protectionB = sheet.getRange("B:B").protect().setDescription("CSS-variable identifiers are managed by the vacation-selection app.");
+  protectionB.setWarningOnly(true);
+
+  // Refresh formatting to apply swatches
+  refreshThemeColorSwatches();
+
+  return "Theme Colors tab created and populated successfully.";
+}
+
+function refreshThemeColorSwatches() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName('Theme Colors');
+  if (!sheet) return "Theme Colors tab not found.";
+
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 2) return "No data to refresh.";
+
+  const headers = data[0].map(h => String(h || '').trim().toLowerCase());
+
+  const themeColumns = [
+    headers.indexOf('boring'),
+    headers.indexOf('anesthesia'),
+    headers.indexOf('ketamine')
+  ];
+
+  const backgrounds = sheet.getDataRange().getBackgrounds();
+  const fontColors = sheet.getDataRange().getFontColors();
+  const fontWeights = sheet.getDataRange().getFontWeights();
+  const fontStyles = sheet.getDataRange().getFontStyles();
+
+  let changesMade = false;
+
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+
+    themeColumns.forEach(colIdx => {
+      if (colIdx !== -1 && colIdx < row.length) {
+        const rawValue = String(row[colIdx] || '');
+        const validColor = validateHexColor(rawValue);
+
+        if (validColor) {
+          // Valid color: set background and contrast text
+          backgrounds[i][colIdx] = validColor;
+          fontColors[i][colIdx] = getContrastTextColor(validColor);
+          fontWeights[i][colIdx] = 'bold';
+          fontStyles[i][colIdx] = 'normal';
+          changesMade = true;
+        } else if (rawValue.trim() !== '') {
+          // Invalid color: neutral warning format
+          backgrounds[i][colIdx] = '#ffffff';
+          fontColors[i][colIdx] = '#dc2626'; // Red text for error
+          fontWeights[i][colIdx] = 'bold';
+          fontStyles[i][colIdx] = 'italic';
+          changesMade = true;
+        } else {
+          // Blank
+          backgrounds[i][colIdx] = '#ffffff';
+          fontColors[i][colIdx] = '#000000';
+          fontWeights[i][colIdx] = 'normal';
+          fontStyles[i][colIdx] = 'normal';
+          changesMade = true;
+        }
+      }
+    });
+  }
+
+  if (changesMade) {
+    const dataRange = sheet.getDataRange();
+    dataRange.setBackgrounds(backgrounds);
+    dataRange.setFontColors(fontColors);
+    dataRange.setFontWeights(fontWeights);
+    dataRange.setFontStyles(fontStyles);
+  }
+
+  return "Theme color swatches refreshed.";
 }
 
 function getParticipantNames() {
@@ -617,10 +908,99 @@ function testQueueWindowSkipNextTurn() {
 
     console.log('PASS: testQueueWindowSkipNextTurn');
 }
+function testThemeColorValidation() {
+  if (validateHexColor('#FFFFFF') !== '#FFFFFF') throw new Error('Failed to validate valid hex');
+  if (validateHexColor(' #ff0000 ') !== '#FF0000') throw new Error('Failed to trim and uppercase hex');
+  if (validateHexColor('#FFF') !== null) throw new Error('Failed to reject 3-digit hex');
+  if (validateHexColor('#FFFFFFFF') !== null) throw new Error('Failed to reject 8-digit hex');
+  if (validateHexColor('rgb(255,0,0)') !== null) throw new Error('Failed to reject rgb()');
+  if (validateHexColor('red') !== null) throw new Error('Failed to reject named color');
+  console.log('PASS: testThemeColorValidation');
+}
+
+function testThemeLuminance() {
+  if (getContrastTextColor('#000000') !== '#FFFFFF') throw new Error('Black background needs white text');
+  if (getContrastTextColor('#FFFFFF') !== '#000000') throw new Error('White background needs black text');
+  console.log('PASS: testThemeLuminance');
+}
+
+function testThemeParserRobustness() {
+  let ss;
+  let originalGetActive;
+  try {
+    ss = setupMockSpreadsheet();
+    originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
+    SpreadsheetApp.getActiveSpreadsheet = () => ss;
+
+    // Test missing tab
+    let config = getThemeColorConfig();
+    if (config.boring['--bg-color'] !== THEME_COLOR_DEFAULTS.boring['--bg-color']) {
+      throw new Error("Missing tab should fall back to default");
+    }
+
+    // Insert tab with missing themes
+    let sheet = ss.insertSheet('Theme Colors');
+    sheet.appendRow(['Role', 'CSS Variable', 'Boring']); // Missing Anesthesia and Ketamine
+    sheet.appendRow(['BG', '--bg-color', '#111111']);
+
+    config = getThemeColorConfig();
+    if (config.boring['--bg-color'] !== '#111111') throw new Error("Should parse valid Boring color");
+    if (config.anesthesia['--bg-color'] !== THEME_COLOR_DEFAULTS.anesthesia['--bg-color']) {
+      throw new Error("Missing Anesthesia column should fall back to default");
+    }
+
+    // Unknown variable and duplicate
+    sheet.appendRow(['Unknown', '--unknown-var', '#222222']);
+    sheet.appendRow(['BG Dup', '--bg-color', '#333333']); // Should ignore duplicate
+
+    config = getThemeColorConfig();
+    if (config.boring['--unknown-var'] !== undefined) throw new Error("Should ignore unknown variables");
+    if (config.boring['--bg-color'] !== '#111111') throw new Error("Should ignore duplicate variables");
+
+    // Invalid value fallback
+    sheet.appendRow(['Surface', '--surface-main', 'invalid']);
+    config = getThemeColorConfig();
+    if (config.boring['--surface-main'] !== THEME_COLOR_DEFAULTS.boring['--surface-main']) {
+      throw new Error("Invalid value should fall back to default individually");
+    }
+
+    console.log('PASS: testThemeParserRobustness');
+  } finally {
+    if (originalGetActive) {
+      SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
+    }
+    if (ss) {
+      const files = DriveApp.getFilesByName(ss.getName());
+      while (files.hasNext()) files.next().setTrashed(true);
+    }
+  }
+}
+
+function testThemeCssGeneration() {
+  const mockConfig = {
+    boring: { '--bg-color': '#111111' },
+    anesthesia: {},
+    ketamine: {}
+  };
+  const css = buildThemeOverridesCss(mockConfig);
+  if (!css.includes('html[data-theme="boring"] {') || !css.includes('--bg-color: #111111;')) {
+    throw new Error('Failed to generate safe CSS from config');
+  }
+  console.log('PASS: testThemeCssGeneration');
+}
+
+function runThemeColorTests() {
+  testThemeColorValidation();
+  testThemeLuminance();
+  testThemeParserRobustness();
+  testThemeCssGeneration();
+}
+
 function runTests() {
   testQueueWindowBehavior();
   testQueueWindowSkipNextTurn();
   testDashboardDataExtraction();
+  runThemeColorTests();
 }
 
 function testRound1SelectableWeeks() {
