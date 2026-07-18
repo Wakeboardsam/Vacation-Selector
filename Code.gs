@@ -154,26 +154,32 @@ function getThemeColorConfig() {
       ketamine: headers.indexOf('ketamine')
     };
 
-    // Track which variables have been processed to ignore duplicates
-    const processedVariables = new Set();
+    // Track processed variables independently per theme
+    const processedByTheme = {
+      boring: new Set(),
+      anesthesia: new Set(),
+      ketamine: new Set()
+    };
 
     for (let i = 1; i < data.length; i++) {
       const row = data[i];
       const cssVarRaw = String(row[1] || '').trim();
 
-      // Ignore unknown variables or duplicates
-      if (!ALLOWED_THEME_VARIABLES.includes(cssVarRaw) || processedVariables.has(cssVarRaw)) {
+      // Ignore unknown variables
+      if (!ALLOWED_THEME_VARIABLES.includes(cssVarRaw)) {
         continue;
       }
-      processedVariables.add(cssVarRaw);
 
       // Extract colors for each theme
       ['boring', 'anesthesia', 'ketamine'].forEach(theme => {
         const colIdx = themeColumns[theme];
         if (colIdx !== -1 && colIdx < row.length) {
-          const validColor = validateHexColor(row[colIdx]);
-          if (validColor) {
+          const rawValue = row[colIdx];
+          const validColor = validateHexColor(rawValue);
+
+          if (validColor && !processedByTheme[theme].has(cssVarRaw)) {
             config[theme][cssVarRaw] = validColor;
+            processedByTheme[theme].add(cssVarRaw);
           }
         }
       });
@@ -192,14 +198,15 @@ function buildThemeOverridesCss(themeConfig) {
   const themes = ['boring', 'anesthesia', 'ketamine'];
 
   themes.forEach(theme => {
-    // Determine the selector format based on existing CSS
     const selector = theme === 'boring' ? 'html[data-theme="boring"]' : `html[data-theme="${theme}"]`;
     css += `${selector} {\n`;
 
     ALLOWED_THEME_VARIABLES.forEach(cssVar => {
-      const val = themeConfig[theme][cssVar];
-      if (val) {
-        css += `  ${cssVar}: ${val};\n`;
+      const candidate = themeConfig && themeConfig[theme] && themeConfig[theme][cssVar];
+      const value = validateHexColor(candidate) || THEME_COLOR_DEFAULTS[theme][cssVar];
+
+      if (value) {
+        css += `  ${cssVar}: ${value};\n`;
       }
     });
 
@@ -940,22 +947,23 @@ function testThemeParserRobustness() {
 
     // Insert tab with missing themes
     let sheet = ss.insertSheet('Theme Colors');
-    sheet.appendRow(['Role', 'CSS Variable', 'Boring']); // Missing Anesthesia and Ketamine
-    sheet.appendRow(['BG', '--bg-color', '#111111']);
+    sheet.appendRow(['Role', 'CSS Variable', 'Boring', 'Anesthesia']); // Add Anesthesia column for subsequent tests
+    sheet.appendRow(['BG', '--bg-color', '#111111', 'invalid']); // Boring gets #111111, Anesthesia gets invalid
 
     config = getThemeColorConfig();
     if (config.boring['--bg-color'] !== '#111111') throw new Error("Should parse valid Boring color");
-    if (config.anesthesia['--bg-color'] !== THEME_COLOR_DEFAULTS.anesthesia['--bg-color']) {
-      throw new Error("Missing Anesthesia column should fall back to default");
+    if (config.ketamine['--bg-color'] !== THEME_COLOR_DEFAULTS.ketamine['--bg-color']) {
+      throw new Error("Missing Ketamine column should fall back to default");
     }
 
-    // Unknown variable and duplicate
+    // Unknown variable and duplicate handling
     sheet.appendRow(['Unknown', '--unknown-var', '#222222']);
-    sheet.appendRow(['BG Dup', '--bg-color', '#333333']); // Should ignore duplicate
+    sheet.appendRow(['BG Dup', '--bg-color', '#333333', '#222222']); // Boring ignores #333333 (already parsed valid row 2), Anesthesia gets #222222 (first valid)
 
     config = getThemeColorConfig();
     if (config.boring['--unknown-var'] !== undefined) throw new Error("Should ignore unknown variables");
-    if (config.boring['--bg-color'] !== '#111111') throw new Error("Should ignore duplicate variables");
+    if (config.boring['--bg-color'] !== '#111111') throw new Error("Should ignore duplicate variables if already processed valid");
+    if (config.anesthesia['--bg-color'] !== '#222222') throw new Error("Should accept later duplicate if first was not valid");
 
     // Invalid value fallback
     sheet.appendRow(['Surface', '--surface-main', 'invalid']);
@@ -963,6 +971,14 @@ function testThemeParserRobustness() {
     if (config.boring['--surface-main'] !== THEME_COLOR_DEFAULTS.boring['--surface-main']) {
       throw new Error("Invalid value should fall back to default individually");
     }
+
+    // Invalid first, valid second duplicate
+    sheet.appendRow(['Accent', '--accent-color', 'invalid', '#222222']); // Boring invalid, Anesthesia valid
+    sheet.appendRow(['Accent', '--accent-color', '#333333', '#444444']); // Boring gets #333333 (first valid), Anesthesia ignores #444444 (already processed valid)
+    config = getThemeColorConfig();
+
+    if (config.boring['--accent-color'] !== '#333333') throw new Error("Boring should accept second row valid if first was invalid");
+    if (config.anesthesia['--accent-color'] !== '#222222') throw new Error("Anesthesia should keep first row valid, ignore second");
 
     console.log('PASS: testThemeParserRobustness');
   } finally {
@@ -978,14 +994,31 @@ function testThemeParserRobustness() {
 
 function testThemeCssGeneration() {
   const mockConfig = {
-    boring: { '--bg-color': '#111111' },
+    boring: { '--bg-color': '#111111', '--accent-color': '#FFFFFF; } body { display:none' }, // Malicious injection attempt
     anesthesia: {},
     ketamine: {}
   };
-  const css = buildThemeOverridesCss(mockConfig);
+
+  // Test builder does not throw when passed incomplete or malformed config
+  let css;
+  try {
+     css = buildThemeOverridesCss(mockConfig);
+  } catch(e) {
+     throw new Error('Builder threw when passed incomplete config');
+  }
+
   if (!css.includes('html[data-theme="boring"] {') || !css.includes('--bg-color: #111111;')) {
     throw new Error('Failed to generate safe CSS from config');
   }
+
+  if (css.includes('display:none')) {
+    throw new Error('Failed to reject injected malicious CSS');
+  }
+
+  if (!css.includes(`--accent-color: ${THEME_COLOR_DEFAULTS.boring['--accent-color']};`)) {
+    throw new Error('Failed to fall back to default when injected CSS is invalid');
+  }
+
   console.log('PASS: testThemeCssGeneration');
 }
 
