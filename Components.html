@@ -1,0 +1,111 @@
+<!-- App Header -->
+<header class="app-header">
+  <h1 class="app-title">Vacation Selection</h1>
+  <button type="button" id="nav-toggle" class="auth-nav-link">Login</button>
+</header>
+
+<main class="main-container">
+
+  <!-- Left/Top Sidebar Area -->
+  <aside class="sidebar-area">
+    <!-- Public Status / Queue Window -->
+    <div id="status-card" class="card">
+      <h2>Queue Status</h2>
+      <div id="status-content">
+        <!-- Skeleton loader -->
+        <div class="skeleton skeleton-title"></div>
+        <div class="skeleton skeleton-text"></div>
+        <div class="skeleton skeleton-text"></div>
+        <div class="skeleton skeleton-text" style="width: 80%"></div>
+      </div>
+    </div>
+
+    <!-- Login Area (Hidden by default) -->
+    <div id="login-card" class="card hidden">
+      <h2>Participant Login</h2>
+      <p>Log in to make your selection or view your dashboard.</p>
+      <form id="login-form" onsubmit="event.preventDefault(); window.appFunctions.login();">
+        <select id="login-name" aria-label="Select your name" required>
+          <option value="" disabled selected>-- Select your name --</option>
+        </select>
+        <input type="password" id="login-pin" placeholder="Enter your PIN" required aria-label="Enter your PIN">
+        <button type="submit" id="login-btn">Log In</button>
+      </form>
+    </div>
+
+    <!-- Dashboard Area (Hidden by default) -->
+    <div id="dashboard-card" class="card hidden">
+      <h2 id="dashboard-welcome">Welcome</h2>
+      <div id="dashboard-summary"></div>
+
+      <div id="selection-controls" class="hidden" style="margin-top: 1.5rem;">
+        <h3>Make a Selection</h3>
+        <p id="selection-rules" class="text-small"></p>
+        <button type="button" id="start-selection-btn" onclick="window.appFunctions.openPrimaryPicker()">Choose your week</button>
+        <!-- The summary of pending choices before confirm -->
+        <div id="pending-selection-summary" class="hidden" style="margin-top:1rem; padding: 1rem; background-color: var(--bg-color); border-radius: 12px;">
+          <div class="text-bold">Pending Selection</div>
+          <div id="pending-weeks-list" style="margin-top: 0.5rem; margin-bottom: 1rem;"></div>
+          <div id="review-actions-container">
+            <!-- Review actions generated dynamically via JS -->
+          </div>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main Content Area -->
+  <section class="content-area">
+    <div class="card" style="background: transparent; border: none; box-shadow: none; padding: 0;">
+      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap: 1rem; margin-bottom: 1rem;">
+        <h2 style="margin:0;">Available Weeks</h2>
+
+        <!-- Name Highlighter -->
+        <div style="display:flex; align-items:center; gap: 0.5rem;">
+          <label for="highlighter-select" class="text-small text-bold">Find person:</label>
+          <select id="highlighter-select" style="margin:0; padding: 0.5rem; width: auto; min-width: 150px;" onchange="window.appFunctions.updateHighlighter()">
+            <option value="">-- None --</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Filter Chips -->
+      <div class="filter-container" id="filter-chips" role="radiogroup" aria-label="Filter weeks">
+        <button class="chip active" role="radio" aria-checked="true" data-filter="all" onclick="window.appFunctions.setFilter('all')">All</button>
+        <button class="chip" role="radio" aria-checked="false" data-filter="available" onclick="window.appFunctions.setFilter('available')">Available</button>
+        <button class="chip" role="radio" aria-checked="false" data-filter="prime" onclick="window.appFunctions.setFilter('prime')">Prime</button>
+        <button class="chip" role="radio" aria-checked="false" data-filter="limited" onclick="window.appFunctions.setFilter('limited')">Limited</button>
+        <button class="chip" role="radio" aria-checked="false" data-filter="full" onclick="window.appFunctions.setFilter('full')">Full</button>
+      </div>
+
+      <!-- Grid -->
+      <div class="week-grid" id="calendar-grid">
+        <!-- Skeletons -->
+        <div class="skeleton skeleton-card"></div>
+        <div class="skeleton skeleton-card"></div>
+        <div class="skeleton skeleton-card"></div>
+        <div class="skeleton skeleton-card"></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- Bottom Sheet Modal (Template) -->
+<div class="modal-backdrop" id="bottom-sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title" tabindex="-1">
+  <div class="modal-panel">
+    <div class="modal-header">
+      <h3 id="sheet-title">Choose your week</h3>
+      <button class="modal-close-btn" aria-label="Close dialog" onclick="window.appFunctions.closeSheet()">&times;</button>
+    </div>
+    <div class="modal-body" id="sheet-body">
+      <!-- Options injected here -->
+    </div>
+    <div class="modal-footer hidden" id="sheet-footer">
+       <div id="sheet-footer-text" class="text-bold">Selected: None</div>
+       <button type="button" id="sheet-continue-btn" onclick="window.appFunctions.handleSheetContinue()">Continue</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast Container -->
+<div class="toast-container" id="toast-container" aria-live="polite"></div>

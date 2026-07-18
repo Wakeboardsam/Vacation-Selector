@@ -1,7 +1,16 @@
 // Final complete Code.gs file - Adds turn data to public view
-function doGet(e) {
-  return HtmlService.createHtmlOutputFromFile('Index').setTitle('Vacation Week Selection System');
+
+function include(filename) {
+  return HtmlService.createHtmlOutputFromFile(filename).getContent();
 }
+
+function doGet(e) {
+  return HtmlService.createTemplateFromFile('Index')
+    .evaluate()
+    .setTitle('Vacation Week Selection System')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}
+
 function normalizeClassification(value) {
   const normalized = String(value || '').trim().toLowerCase();
 
@@ -121,12 +130,65 @@ function getDashboardData(name) {
   const weekData = weekSheet.getDataRange().getValues();
   const currentRound = configSheet.getRange("B2").getValue();
 
+  // Find user details in Turn Management
+  const turnHeaders = turnDataRaw[0];
+  const nameIdx = turnHeaders.indexOf('Name');
+  const weeksSelectedIdx = turnHeaders.indexOf('WeeksSelected');
+  const skipNextTurnIdx = turnHeaders.indexOf('SkipNextTurn');
+
+  let weeksSelected = 0;
+  let skipNextTurn = false;
+
+  if (nameIdx !== -1) {
+    const userRow = turnDataRaw.slice(1).find(row => row[nameIdx] === name);
+    if (userRow) {
+      if (weeksSelectedIdx !== -1) weeksSelected = Number(userRow[weeksSelectedIdx]) || 0;
+      if (skipNextTurnIdx !== -1) skipNextTurn = Boolean(userRow[skipNextTurnIdx]);
+    }
+  }
+
+  // Derive selectedWeeks from Week Availability sheet
+  const weekHeaders = weekData[0];
+  const selectedWeeks = [];
+
+  // Person 1-4 columns are at indexes 2, 3, 4, 5
+  weekData.slice(1).forEach(row => {
+    let hasSelected = false;
+    for (let i = 2; i <= 5; i++) {
+      if (row[i] === name) {
+        hasSelected = true;
+        break;
+      }
+    }
+
+    if (hasSelected) {
+      selectedWeeks.push({
+        valueDate: row[0] instanceof Date ? row[0].getTime() : null,
+        displayDate: row[0] instanceof Date ? row[0].toLocaleDateString("en-US", { timeZone: "UTC", month: 'short', day: 'numeric' }) : String(row[0]),
+        classification: normalizeClassification(row[1]) || row[1]
+      });
+    }
+  });
+
+  // Sort chronologically
+  selectedWeeks.sort((a, b) => {
+    if (a.valueDate && b.valueDate) return a.valueDate - b.valueDate;
+    return 0;
+  });
+
   weekData.shift();
 
   const queueWindow = calculateQueueWindow(turnDataRaw, currentRound);
 
   const userObj = queueWindow.find(p => p.name === name);
-  const currentUser = { name: userObj.name, queuePosition: userObj.queuePosition, status: userObj.computedStatus };
+  const currentUser = {
+    name: userObj ? userObj.name : name,
+    queuePosition: userObj ? userObj.queuePosition : null,
+    status: userObj ? userObj.computedStatus : 'Unknown',
+    weeksSelected: weeksSelected,
+    skipNextTurn: skipNextTurn,
+    selectedWeeks: selectedWeeks
+  };
 
   const turnQueue = queueWindow.map(p => ({
       name: p.name,
@@ -558,6 +620,7 @@ function testQueueWindowSkipNextTurn() {
 function runTests() {
   testQueueWindowBehavior();
   testQueueWindowSkipNextTurn();
+  testDashboardDataExtraction();
 }
 
 function testRound1SelectableWeeks() {
@@ -601,6 +664,67 @@ function testInvalidClassification() {
   }
 
   console.log('PASS: Invalid classification properly detected.');
+}
+
+function testDashboardDataExtraction() {
+    let ss;
+    try {
+        ss = setupMockSpreadsheet();
+        const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
+        SpreadsheetApp.getActiveSpreadsheet = () => ss;
+
+        try {
+            // Setup some test data in mock spreadsheet
+            const turnSheet = ss.getSheetByName('Turn Management');
+            const weekSheet = ss.getSheetByName('Week Availability');
+
+            // Give Person1 2 weeks selected, and SkipNextTurn true
+            // Headers: Name(1), PIN(2), SeniorityPosition(3), Status(4), WeeksSelected(5), LotteryPosition(6), SkipNextTurn(7)
+            turnSheet.getRange(2, 5).setValue(2);
+            turnSheet.getRange(2, 7).setValue(true);
+
+            // Assign Person1 to week 1 (Prime) in P1 col
+            weekSheet.getRange(2, 3).setValue('Person1');
+
+            // Assign Person1 to week 2 (Non-Prime) in P2 col
+            weekSheet.getRange(3, 4).setValue('Person1');
+
+            // Assign Person2 to week 2 (Non-Prime) in P3 col
+            weekSheet.getRange(3, 5).setValue('Person2');
+
+            // Assign Person3 to week 2 (Non-Prime) in P4 col
+            weekSheet.getRange(3, 6).setValue('Person3');
+
+            // Test Person1 extraction (P1 and P2 cols)
+            let dashboard1 = getDashboardData('Person1');
+            if (dashboard1.currentUser.weeksSelected !== 2) throw new Error("Expected weeksSelected to be 2 for Person1");
+            if (dashboard1.currentUser.skipNextTurn !== true) throw new Error("Expected skipNextTurn to be true for Person1");
+            if (dashboard1.currentUser.selectedWeeks.length !== 2) throw new Error("Expected selectedWeeks length to be 2 for Person1");
+            if (dashboard1.currentUser.selectedWeeks[0].classification !== 'Prime') throw new Error("Expected first selected week to be Prime");
+
+            // Test Person2 extraction (P3 col)
+            let dashboard2 = getDashboardData('Person2');
+            if (dashboard2.currentUser.selectedWeeks.length !== 1) throw new Error("Expected selectedWeeks length to be 1 for Person2");
+
+            // Test Person3 extraction (P4 col)
+            let dashboard3 = getDashboardData('Person3');
+            if (dashboard3.currentUser.selectedWeeks.length !== 1) throw new Error("Expected selectedWeeks length to be 1 for Person3");
+
+            // Test Person4 extraction (no weeks)
+            let dashboard4 = getDashboardData('Person4');
+            if (dashboard4.currentUser.selectedWeeks.length !== 0) throw new Error("Expected selectedWeeks length to be 0 for Person4");
+
+            console.log("PASS: testDashboardDataExtraction");
+
+        } finally {
+            SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
+        }
+    } finally {
+        if (ss) {
+            const files = DriveApp.getFilesByName(ss.getName());
+            while (files.hasNext()) files.next().setTrashed(true);
+        }
+    }
 }
 
 function runMoreTests() {
