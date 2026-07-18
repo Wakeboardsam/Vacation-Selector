@@ -92,7 +92,6 @@
 
       select {
         min-height: 48px;
-        touch-action: manipulation;
       }
 
       select:focus, input:focus {
@@ -383,8 +382,47 @@
         }
       }
 
+      function createWeekSelect(id, weeks, placeholderText, isWeek2 = false, currentRound = 1) {
+        const select = document.createElement("select");
+        select.id = id;
+        select.style.width = "100%";
+
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        placeholder.textContent = placeholderText;
+        select.add(placeholder);
+
+        weeks.forEach(week => {
+          const option = document.createElement("option");
+          option.value = String(week.valueDate);
+          if (week.classification) {
+            option.dataset.type = week.classification;
+          }
+          // Do not include classification prefix for week2 as all options are Non-Prime
+          const prefix = (!isWeek2 && week.classification) ? `${week.classification} — ` : "";
+          option.textContent =
+            `${prefix}${week.displayDate} ` +
+            `(${week.spotsRemaining} spots left)`;
+          select.add(option);
+        });
+
+        if (id === "week1") {
+          select.addEventListener("change", () => {
+            handleWeek1Change(select, currentRound);
+          });
+        } else if (id === "week2") {
+          select.addEventListener("change", () => {
+            handleWeek2Change();
+          });
+        }
+
+        return select;
+      }
+
       function buildSelectionForm(weeks, currentRound) {
         const formDiv = document.getElementById("selection-area");
+        // Clear previous content just in case
+        formDiv.innerHTML = "";
 
         const invalidClassifications = weeks.filter(w => w.classification === null);
 
@@ -401,24 +439,53 @@
         const primeWeeks = weeks.filter(w => w.classification === 'Prime');
         const nonPrimeWeeks = weeks.filter(w => w.classification === 'Non-Prime');
 
-        let formHTML = `<h3>Your Turn to Select!</h3>`;
+        let headerHTML = `<h3>Your Turn to Select!</h3>`;
         if (currentRound === 1) {
-            formHTML += `<p><b>Rule Reminder:</b> Round 1 allows for exactly ONE week selection only (Prime or Non-Prime).</p>`;
+            headerHTML += `<p><b>Rule Reminder:</b> Round 1 allows for exactly ONE week selection only (Prime or Non-Prime).</p>`;
         } else {
-            formHTML += `<p><b>Rule Reminder:</b> Select one Prime week OR one/two Non-Prime weeks.</p>`;
+            headerHTML += `<p><b>Rule Reminder:</b> Select one Prime week OR one/two Non-Prime weeks.</p>`;
         }
+        headerHTML += `<p style="font-size:0.9em; color:#6b7280;">Loaded ${weeks.length} selectable week(s) (${primeWeeks.length} Prime, ${nonPrimeWeeks.length} Non-Prime).</p>`;
 
-        formHTML += `<p style="font-size:0.9em; color:#6b7280;">Loaded ${weeks.length} selectable week(s) (${primeWeeks.length} Prime, ${nonPrimeWeeks.length} Non-Prime).</p>`;
+        formDiv.innerHTML = headerHTML;
 
-        formHTML += `<label for="week1">Primary Week Selection:</label><select id="week1" style="width:100%" onchange="handleWeek1Change(this, ${currentRound})"><option value="" selected>-- Choose a week --</option><optgroup label="Prime Weeks">${primeWeeks.map(w => `<option value="${w.valueDate}" data-type="Prime">${w.displayDate} (${w.spotsRemaining} spots left)</option>`).join('')}</optgroup><optgroup label="Non-Prime Weeks">${nonPrimeWeeks.map(w => `<option value="${w.valueDate}" data-type="Non-Prime">${w.displayDate} (${w.spotsRemaining} spots left)</option>`).join('')}</optgroup></select>`;
+        // Week 1
+        const week1Label = document.createElement("label");
+        week1Label.setAttribute("for", "week1");
+        week1Label.textContent = "Primary Week Selection:";
+        formDiv.appendChild(week1Label);
 
+        // Keep existing order: Prime first, then Non-Prime
+        const orderedWeeks = primeWeeks.concat(nonPrimeWeeks);
+        const week1Select = createWeekSelect("week1", orderedWeeks, "-- Choose a week --", false, currentRound);
+        formDiv.appendChild(week1Select);
+
+        console.log("week1 options:", week1Select.options.length);
+
+        // Week 2
         if (currentRound !== 1) {
-            formHTML += `<label for="week2">Additional Non-Prime Week (optional):</label><select id="week2" style="width:100%" onchange="handleWeek2Change()"><option value="" selected>-- No second week --</option>${nonPrimeWeeks.map(w => `<option value="${w.valueDate}">${w.displayDate} (${w.spotsRemaining} spots left)</option>`).join('')}</select>`;
-            formHTML += `<p id="week2-warning" style="color: #854d0e; font-size: 0.9em; display: none;"><i>Warning: Choosing a second non-prime week will forfeit your next scheduled turn.</i></p>`;
+            const week2Label = document.createElement("label");
+            week2Label.setAttribute("for", "week2");
+            week2Label.textContent = "Additional Non-Prime Week (optional):";
+            formDiv.appendChild(week2Label);
+
+            const week2Select = createWeekSelect("week2", nonPrimeWeeks, "-- No second week --", true);
+            formDiv.appendChild(week2Select);
+
+            const week2Warning = document.createElement("p");
+            week2Warning.id = "week2-warning";
+            week2Warning.style.color = "#854d0e";
+            week2Warning.style.fontSize = "0.9em";
+            week2Warning.style.display = "none";
+            week2Warning.innerHTML = `<i>Warning: Choosing a second non-prime week will forfeit your next scheduled turn.</i>`;
+            formDiv.appendChild(week2Warning);
         }
 
-        formHTML += `<button onclick="submitSelection()" style="width:100%">Submit Selection</button>`;
-        formDiv.innerHTML += formHTML;
+        const submitBtn = document.createElement("button");
+        submitBtn.style.width = "100%";
+        submitBtn.textContent = "Submit Selection";
+        submitBtn.addEventListener("click", submitSelection);
+        formDiv.appendChild(submitBtn);
       }
       
       function handleWeek1Change(selectElement, currentRound) {
