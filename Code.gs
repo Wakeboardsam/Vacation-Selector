@@ -620,6 +620,7 @@ function testQueueWindowSkipNextTurn() {
 function runTests() {
   testQueueWindowBehavior();
   testQueueWindowSkipNextTurn();
+  testDashboardDataExtraction();
 }
 
 function testRound1SelectableWeeks() {
@@ -682,30 +683,36 @@ function testDashboardDataExtraction() {
             turnSheet.getRange(2, 5).setValue(2);
             turnSheet.getRange(2, 7).setValue(true);
 
-            // Assign Person1 to week 1 (Prime) and week 2 (Non-Prime)
-            weekSheet.getRange(2, 3).setValue('Person1'); // Week 1, P1 col
-            weekSheet.getRange(3, 4).setValue('Person1'); // Week 2, P2 col
+            // Assign Person1 to week 1 (Prime) in P1 col
+            weekSheet.getRange(2, 3).setValue('Person1');
 
-            // Assign Person2 to week 1 (Prime)
-            weekSheet.getRange(2, 4).setValue('Person2'); // Week 1, P2 col
+            // Assign Person1 to week 2 (Non-Prime) in P2 col
+            weekSheet.getRange(3, 4).setValue('Person1');
 
-            // Test Person1 extraction
+            // Assign Person2 to week 2 (Non-Prime) in P3 col
+            weekSheet.getRange(3, 5).setValue('Person2');
+
+            // Assign Person3 to week 2 (Non-Prime) in P4 col
+            weekSheet.getRange(3, 6).setValue('Person3');
+
+            // Test Person1 extraction (P1 and P2 cols)
             let dashboard1 = getDashboardData('Person1');
-
-            if (dashboard1.currentUser.weeksSelected !== 2) throw new Error("Expected weeksSelected to be 2");
-            if (dashboard1.currentUser.skipNextTurn !== true) throw new Error("Expected skipNextTurn to be true");
-            if (dashboard1.currentUser.selectedWeeks.length !== 2) throw new Error("Expected selectedWeeks length to be 2");
+            if (dashboard1.currentUser.weeksSelected !== 2) throw new Error("Expected weeksSelected to be 2 for Person1");
+            if (dashboard1.currentUser.skipNextTurn !== true) throw new Error("Expected skipNextTurn to be true for Person1");
+            if (dashboard1.currentUser.selectedWeeks.length !== 2) throw new Error("Expected selectedWeeks length to be 2 for Person1");
             if (dashboard1.currentUser.selectedWeeks[0].classification !== 'Prime') throw new Error("Expected first selected week to be Prime");
 
-            // Test Person2 extraction
+            // Test Person2 extraction (P3 col)
             let dashboard2 = getDashboardData('Person2');
-            if (dashboard2.currentUser.weeksSelected !== 0) throw new Error("Expected weeksSelected to be 0 for Person2");
-            if (dashboard2.currentUser.skipNextTurn !== false) throw new Error("Expected skipNextTurn to be false for Person2");
             if (dashboard2.currentUser.selectedWeeks.length !== 1) throw new Error("Expected selectedWeeks length to be 1 for Person2");
 
-            // Test Person3 extraction (no weeks)
+            // Test Person3 extraction (P4 col)
             let dashboard3 = getDashboardData('Person3');
-            if (dashboard3.currentUser.selectedWeeks.length !== 0) throw new Error("Expected selectedWeeks length to be 0 for Person3");
+            if (dashboard3.currentUser.selectedWeeks.length !== 1) throw new Error("Expected selectedWeeks length to be 1 for Person3");
+
+            // Test Person4 extraction (no weeks)
+            let dashboard4 = getDashboardData('Person4');
+            if (dashboard4.currentUser.selectedWeeks.length !== 0) throw new Error("Expected selectedWeeks length to be 0 for Person4");
 
             console.log("PASS: testDashboardDataExtraction");
 
@@ -723,7 +730,6 @@ function testDashboardDataExtraction() {
 function runMoreTests() {
   testRound1SelectableWeeks();
   testInvalidClassification();
-  testDashboardDataExtraction();
 }
 
 // ============================================================================

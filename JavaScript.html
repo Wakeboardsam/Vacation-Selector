@@ -316,6 +316,22 @@ const appFunctions = {
     const summary = document.getElementById('dashboard-summary');
     summary.innerHTML = '';
 
+    let allFull = true;
+    if (data.availableWeeks && data.availableWeeks.length > 0) {
+      data.availableWeeks.forEach(w => {
+         if (w.spotsRemaining > 0) allFull = false;
+      });
+    }
+
+    if (allFull || data.availableWeeks.length === 0) {
+      const p = document.createElement('p');
+      p.className = 'text-bold';
+      p.textContent = "Selection Complete: All available vacation slots have been filled.";
+      summary.appendChild(p);
+      document.getElementById('selection-controls').classList.add('hidden');
+      return;
+    }
+
     // Queue pos
     const pos = document.createElement('p');
     if (['Active', 'Standby', 'Backup'].includes(data.currentUser.status)) {
@@ -407,7 +423,8 @@ const appFunctions = {
           this.renderAuthNav();
           this.fetchDashboardData();
           this.showToast("Logged in successfully.");
-          // Do not store PIN
+          // Clear PIN immediately
+          document.getElementById('login-pin').value = '';
         } else {
           this.showToast("Invalid PIN.", true);
         }
@@ -538,37 +555,24 @@ const appFunctions = {
     const footer = document.getElementById('sheet-footer');
     const text = document.getElementById('sheet-footer-text');
     const continueBtn = document.getElementById('sheet-continue-btn');
-    const addSecondBtn = document.getElementById('sheet-add-second-btn');
 
     footer.classList.remove('hidden');
 
     if (!selectedItem) {
       text.textContent = "Selected: None";
       continueBtn.disabled = true;
-      addSecondBtn.classList.add('hidden');
       return;
     }
 
     continueBtn.disabled = false;
     text.textContent = `Selected: ${selectedItem.displayDate}`;
-
-    // Logic for "Add second"
-    addSecondBtn.classList.add('hidden');
     continueBtn.textContent = "Continue";
-
-    if (appState.sheetMode === 'primary') {
-      const isRound1 = appState.dashboardData.currentRound === 1;
-      if (!isRound1 && selectedItem.classification === 'Non-Prime') {
-        addSecondBtn.classList.remove('hidden');
-      }
-    } else if (appState.sheetMode === 'secondary') {
-      continueBtn.textContent = "Review both weeks";
-    }
   },
 
   handleSheetContinue: function() {
-    this.closeSheet();
-    this.updateSelectionSummaryUI();
+    this.closeSheet(() => {
+      this.updateSelectionSummaryUI();
+    });
   },
 
   openSheet: function() {
@@ -583,12 +587,14 @@ const appFunctions = {
     }, 300);
   },
 
-  closeSheet: function() {
+  closeSheet: function(onClosedCallback) {
     const sheet = document.getElementById('bottom-sheet');
     sheet.classList.remove('visible');
     setTimeout(() => {
       sheet.style.display = 'none';
-      if (appState.sheetMode) {
+      if (typeof onClosedCallback === 'function') {
+        onClosedCallback();
+      } else if (appState.sheetMode) {
         document.getElementById('start-selection-btn').focus();
       }
     }, 300);
@@ -598,25 +604,32 @@ const appFunctions = {
     const summaryContainer = document.getElementById('pending-selection-summary');
     const btn = document.getElementById('start-selection-btn');
     const list = document.getElementById('pending-weeks-list');
+    const actionsContainer = document.getElementById('review-actions-container');
 
     if (!appState.pendingWeek1) {
       summaryContainer.classList.add('hidden');
       btn.classList.remove('hidden');
+      if (document.activeElement && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'SELECT') {
+         btn.focus();
+      }
       return;
     }
 
     btn.classList.add('hidden');
     summaryContainer.classList.remove('hidden');
-
     list.innerHTML = '';
+    if(actionsContainer) actionsContainer.innerHTML = '';
 
     // Week 1
     const w1 = document.createElement('div');
     w1.textContent = `1. ${appState.pendingWeek1.displayDate} (${appState.pendingWeek1.classification})`;
     list.appendChild(w1);
 
-    // Week 2
+    const isRound1 = appState.dashboardData.currentRound === 1;
+    let confirmBtnText = "Confirm selection";
+
     if (appState.pendingWeek2) {
+      // Two Non-Prime
       const w2 = document.createElement('div');
       w2.textContent = `2. ${appState.pendingWeek2.displayDate} (${appState.pendingWeek2.classification})`;
       list.appendChild(w2);
@@ -627,6 +640,43 @@ const appFunctions = {
       warn.style.marginTop = '0.5rem';
       warn.textContent = "⚠️ Submitting two weeks will forfeit your next scheduled turn.";
       list.appendChild(warn);
+
+      confirmBtnText = "Confirm both";
+    } else if (!isRound1 && appState.pendingWeek1.classification === 'Non-Prime') {
+      // One Non-Prime (Round 2+)
+      confirmBtnText = "Submit one week";
+
+      const addSecondBtn = document.createElement('button');
+      addSecondBtn.type = 'button';
+      addSecondBtn.className = 'secondary';
+      addSecondBtn.style.marginBottom = '0.5rem';
+      addSecondBtn.textContent = "Add a second non-prime week";
+      addSecondBtn.onclick = () => window.appFunctions.openSecondaryPicker();
+      if(actionsContainer) actionsContainer.appendChild(addSecondBtn);
+    }
+
+    // Confirm button
+    const confirmBtn = document.createElement('button');
+    confirmBtn.type = 'button';
+    confirmBtn.id = 'submit-selection-btn';
+    confirmBtn.className = 'secondary';
+    confirmBtn.textContent = confirmBtnText;
+    confirmBtn.onclick = () => window.appFunctions.submitSelection();
+    if(actionsContainer) actionsContainer.insertBefore(confirmBtn, actionsContainer.firstChild);
+
+    // Change/Cancel button
+    const changeBtn = document.createElement('button');
+    changeBtn.type = 'button';
+    changeBtn.className = 'text-only';
+    changeBtn.style.width = '100%';
+    changeBtn.style.marginTop = '0.5rem';
+    changeBtn.textContent = appState.pendingWeek2 ? "Change selections" : "Change week";
+    changeBtn.onclick = () => window.appFunctions.resetSelection();
+    if(actionsContainer) actionsContainer.appendChild(changeBtn);
+
+    // Focus primary action
+    if (document.activeElement && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'SELECT') {
+        setTimeout(() => { if(confirmBtn) confirmBtn.focus(); }, 50);
     }
   },
 

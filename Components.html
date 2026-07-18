@@ -1,7 +1,7 @@
 <!-- App Header -->
 <header class="app-header">
   <h1 class="app-title">Vacation Selection</h1>
-  <a id="nav-toggle" class="auth-nav-link" tabindex="0" role="button">Login</a>
+  <button type="button" id="nav-toggle" class="auth-nav-link">Login</button>
 </header>
 
 <main class="main-container">
@@ -45,9 +45,10 @@
         <!-- The summary of pending choices before confirm -->
         <div id="pending-selection-summary" class="hidden" style="margin-top:1rem; padding: 1rem; background-color: var(--bg-color); border-radius: 12px;">
           <div class="text-bold">Pending Selection</div>
-          <div id="pending-weeks-list" style="margin-top: 0.5rem;"></div>
-          <button type="button" class="secondary" style="margin-top: 1rem;" onclick="window.appFunctions.submitSelection()" id="submit-selection-btn">Confirm Selection</button>
-          <button type="button" class="text-only" style="width:100%; margin-top: 0.5rem;" onclick="window.appFunctions.resetSelection()">Cancel</button>
+          <div id="pending-weeks-list" style="margin-top: 0.5rem; margin-bottom: 1rem;"></div>
+          <div id="review-actions-container">
+            <!-- Review actions generated dynamically via JS -->
+          </div>
         </div>
       </div>
     </div>
@@ -102,7 +103,6 @@
     <div class="modal-footer hidden" id="sheet-footer">
        <div id="sheet-footer-text" class="text-bold">Selected: None</div>
        <button type="button" id="sheet-continue-btn" onclick="window.appFunctions.handleSheetContinue()">Continue</button>
-       <button type="button" id="sheet-add-second-btn" class="secondary hidden" onclick="window.appFunctions.openSecondaryPicker()">Add a second non-prime week</button>
     </div>
   </div>
 </div>
