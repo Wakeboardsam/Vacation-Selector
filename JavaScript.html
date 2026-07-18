@@ -1,0 +1,722 @@
+<script>
+const appState = {
+  currentUserName: null,
+  publicData: null,
+  dashboardData: null,
+  activeFilter: 'all',
+  highlightName: '',
+  // Selection state
+  pendingWeek1: null,
+  pendingWeek2: null,
+  sheetMode: null // 'primary' or 'secondary'
+};
+
+const appFunctions = {
+  init: function() {
+    this.fetchPublicData();
+    this.fetchParticipantNames();
+
+    // Set up modal listeners
+    const backdrop = document.getElementById('bottom-sheet');
+    backdrop.addEventListener('click', (e) => {
+      if (e.target === backdrop) this.closeSheet();
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && backdrop.classList.contains('visible')) {
+        this.closeSheet();
+      }
+    });
+
+    // Toggle logic for Login vs Public
+    document.getElementById('nav-toggle').addEventListener('click', () => {
+      if (appState.currentUserName) {
+        // Log out
+        appState.currentUserName = null;
+        appState.dashboardData = null;
+        this.resetSelection();
+        this.renderAuthNav();
+        this.showLogin();
+      } else {
+        // Toggle view
+        const loginCard = document.getElementById('login-card');
+        if (loginCard.classList.contains('hidden')) {
+          this.showLogin();
+        } else {
+          this.showPublicStatus();
+        }
+      }
+    });
+  },
+
+  // ---------------------------------------------------------
+  // Data Fetching
+  // ---------------------------------------------------------
+  fetchPublicData: function() {
+    google.script.run
+      .withSuccessHandler((data) => {
+        appState.publicData = data;
+        this.renderStatus();
+        this.renderCalendar();
+      })
+      .withFailureHandler((err) => {
+        this.showToast("Error loading calendar: " + err.message, true);
+      })
+      .getPublicCalendarData();
+  },
+
+  fetchParticipantNames: function() {
+    google.script.run
+      .withSuccessHandler((names) => {
+        const loginSelect = document.getElementById('login-name');
+        const hlSelect = document.getElementById('highlighter-select');
+
+        // Keep first option
+        loginSelect.options.length = 1;
+        hlSelect.options.length = 1;
+
+        if (Array.isArray(names)) {
+          names.sort().forEach(n => {
+            loginSelect.add(new Option(n, n));
+            hlSelect.add(new Option(n, n));
+          });
+        } else {
+          console.error("fetchParticipantNames did not return an array", names);
+        }
+      })
+      .getParticipantNames();
+  },
+
+  fetchDashboardData: function() {
+    if (!appState.currentUserName) return;
+    google.script.run
+      .withSuccessHandler((data) => {
+        appState.dashboardData = data;
+        this.renderDashboard();
+      })
+      .withFailureHandler((err) => {
+        this.showToast("Error loading dashboard: " + err.message, true);
+      })
+      .getDashboardData(appState.currentUserName);
+  },
+
+  // ---------------------------------------------------------
+  // Rendering
+  // ---------------------------------------------------------
+  renderStatus: function() {
+    const data = appState.publicData;
+    if (!data) return;
+
+    const content = document.getElementById('status-content');
+    content.innerHTML = '';
+
+    let allFull = true;
+    data.calendarData.forEach(w => {
+       if (w.spotsRemaining > 0) allFull = false;
+    });
+
+    if (allFull || data.calendarData.length === 0) {
+      const p = document.createElement('p');
+      p.className = 'text-bold';
+      p.textContent = "Selection Complete: All available vacation slots have been filled.";
+      content.appendChild(p);
+      return;
+    }
+
+    const activeUsers = data.turnQueue.filter(p => ['Active', 'Standby', 'Backup'].includes(p.status));
+    let nextUpUsers = data.turnQueue.filter(p => p.status === 'Waiting').slice(0, 5);
+
+    const roundHeader = document.createElement('h3');
+    roundHeader.textContent = `Round ${data.currentRound} Window`;
+    content.appendChild(roundHeader);
+
+    activeUsers.forEach(p => {
+      const item = document.createElement('div');
+      item.className = 'status-item';
+
+      const icon = document.createElement('span');
+      icon.className = 'status-icon';
+      icon.textContent = p.status === 'Active' ? '🟢' : '🟡';
+
+      const details = document.createElement('div');
+      details.className = 'status-details';
+
+      const nameEl = document.createElement('span');
+      nameEl.className = 'text-bold';
+      nameEl.textContent = p.name;
+
+      const posEl = document.createElement('span');
+      posEl.className = 'text-small';
+      posEl.textContent = `${p.status} (#${p.queuePosition})`;
+
+      details.appendChild(nameEl);
+      details.appendChild(posEl);
+
+      item.appendChild(icon);
+      item.appendChild(details);
+      content.appendChild(item);
+    });
+
+    if (nextUpUsers.length > 0) {
+      const nextHeader = document.createElement('h3');
+      nextHeader.style.marginTop = '1rem';
+      nextHeader.textContent = "Next Up";
+      content.appendChild(nextHeader);
+
+      const nextList = document.createElement('div');
+      nextUpUsers.forEach(p => {
+        const d = document.createElement('div');
+        d.className = 'text-small';
+        d.style.marginBottom = '0.25rem';
+        d.textContent = `${p.name} (#${p.queuePosition})`;
+        nextList.appendChild(d);
+      });
+      content.appendChild(nextList);
+    }
+  },
+
+  renderCalendar: function() {
+    const data = appState.publicData;
+    if (!data) return;
+
+    const grid = document.getElementById('calendar-grid');
+    grid.innerHTML = '';
+
+    // Apply Filters
+    let weeks = data.calendarData;
+    if (appState.activeFilter === 'available') {
+      weeks = weeks.filter(w => w.spotsRemaining > 0);
+    } else if (appState.activeFilter === 'prime') {
+      weeks = weeks.filter(w => w.classification === 'Prime');
+    } else if (appState.activeFilter === 'limited') {
+      weeks = weeks.filter(w => w.spotsRemaining === 1);
+    } else if (appState.activeFilter === 'full') {
+      weeks = weeks.filter(w => w.spotsRemaining === 0);
+    }
+
+    if (weeks.length === 0) {
+      grid.innerHTML = '<p>No weeks match the current filter.</p>';
+      return;
+    }
+
+    weeks.forEach(w => {
+      const card = document.createElement('div');
+      card.className = 'week-card';
+
+      const header = document.createElement('div');
+      header.className = 'week-header';
+
+      const dateEl = document.createElement('h3');
+      dateEl.className = 'week-date';
+      dateEl.textContent = w.startDate;
+
+      const badge = document.createElement('span');
+      badge.className = 'badge';
+      if (w.classification === 'Prime') {
+        badge.classList.add('prime');
+        badge.textContent = 'PRIME';
+      } else {
+        badge.classList.add('available'); // generic tint for non-prime
+        badge.textContent = w.classification;
+      }
+
+      header.appendChild(dateEl);
+      header.appendChild(badge);
+      card.appendChild(header);
+
+      const capacityRow = document.createElement('div');
+      capacityRow.style.display = 'flex';
+      capacityRow.style.justifyContent = 'space-between';
+      capacityRow.style.alignItems = 'center';
+
+      const spotsText = document.createElement('span');
+      spotsText.className = 'text-small text-bold';
+
+      if (w.spotsRemaining === 0) {
+        spotsText.textContent = 'FULL';
+        spotsText.style.color = 'var(--full-text)';
+      } else {
+        spotsText.textContent = `${w.spotsRemaining} spots left`;
+        if (w.spotsRemaining === 1) spotsText.style.color = 'var(--limited-text)';
+      }
+
+      const dots = document.createElement('div');
+      dots.className = 'spots-indicator';
+      for (let i = 0; i < 4; i++) {
+        const dot = document.createElement('div');
+        dot.className = 'spot-dot';
+        if (i < (4 - w.spotsRemaining)) dot.classList.add('filled');
+        dots.appendChild(dot);
+      }
+
+      capacityRow.appendChild(spotsText);
+      capacityRow.appendChild(dots);
+      card.appendChild(capacityRow);
+
+      const participants = [w.person1, w.person2, w.person3, w.person4].filter(p => p && String(p).trim() !== '');
+      if (participants.length > 0) {
+        const pList = document.createElement('div');
+        pList.className = 'participant-list';
+
+        participants.forEach((p, index) => {
+          const span = document.createElement('span');
+          span.textContent = p;
+          if (appState.highlightName && p === appState.highlightName) {
+            span.classList.add('highlight-name');
+          }
+          pList.appendChild(span);
+          if (index < participants.length - 1) {
+            pList.appendChild(document.createTextNode(' · '));
+          }
+        });
+        card.appendChild(pList);
+      }
+
+      grid.appendChild(card);
+    });
+  },
+
+  renderAuthNav: function() {
+    const nav = document.getElementById('nav-toggle');
+    if (appState.currentUserName) {
+      nav.textContent = 'Log Out';
+    } else {
+      nav.textContent = 'Login';
+    }
+  },
+
+  showLogin: function() {
+    document.getElementById('status-card').classList.add('hidden');
+    document.getElementById('dashboard-card').classList.add('hidden');
+    document.getElementById('login-card').classList.remove('hidden');
+    document.getElementById('login-pin').value = '';
+
+    // Clear selections on view change just in case
+    this.resetSelection();
+  },
+
+  showPublicStatus: function() {
+    document.getElementById('login-card').classList.add('hidden');
+    document.getElementById('dashboard-card').classList.add('hidden');
+    document.getElementById('status-card').classList.remove('hidden');
+  },
+
+  showDashboard: function() {
+    document.getElementById('login-card').classList.add('hidden');
+    document.getElementById('status-card').classList.add('hidden');
+    document.getElementById('dashboard-card').classList.remove('hidden');
+  },
+
+  renderDashboard: function() {
+    const data = appState.dashboardData;
+    if (!data) return;
+
+    this.showDashboard();
+    document.getElementById('dashboard-welcome').textContent = `Good ${this.getTimeOfDay()}, ${data.currentUser.name}`;
+
+    const summary = document.getElementById('dashboard-summary');
+    summary.innerHTML = '';
+
+    // Queue pos
+    const pos = document.createElement('p');
+    if (['Active', 'Standby', 'Backup'].includes(data.currentUser.status)) {
+      pos.className = 'text-bold';
+      pos.style.color = 'var(--available-text)';
+      pos.textContent = "You can select now.";
+    } else {
+      pos.textContent = `You're #${data.currentUser.queuePosition} in line. (${data.currentUser.status})`;
+    }
+    summary.appendChild(pos);
+
+    // Selected weeks
+    const selected = document.createElement('div');
+    selected.className = 'card';
+    selected.style.padding = '1rem';
+    selected.style.marginTop = '1rem';
+    selected.style.boxShadow = 'none';
+    selected.style.backgroundColor = 'var(--bg-color)';
+
+    const selTitle = document.createElement('div');
+    selTitle.className = 'text-bold';
+    selTitle.style.marginBottom = '0.5rem';
+    selTitle.textContent = `${data.currentUser.weeksSelected || 0} weeks selected`;
+    selected.appendChild(selTitle);
+
+    if (data.currentUser.selectedWeeks && data.currentUser.selectedWeeks.length > 0) {
+      const list = document.createElement('ul');
+      list.style.margin = '0';
+      list.style.paddingLeft = '1.2rem';
+      list.style.color = 'var(--text-secondary)';
+      list.style.fontSize = '0.875rem';
+
+      data.currentUser.selectedWeeks.forEach(w => {
+        const li = document.createElement('li');
+        li.textContent = `${w.displayDate} (${w.classification})`;
+        list.appendChild(li);
+      });
+      selected.appendChild(list);
+    }
+    summary.appendChild(selected);
+
+    // Consequence
+    const consq = document.createElement('p');
+    consq.className = 'text-small';
+    consq.style.marginTop = '1rem';
+    if (data.currentUser.skipNextTurn) {
+      consq.textContent = "⚠️ Your next scheduled turn will be skipped (due to prior two-week selection).";
+      consq.style.color = 'var(--limited-text)';
+    } else {
+      consq.textContent = "No turn forfeiture pending.";
+    }
+    summary.appendChild(consq);
+
+    // Selection Controls
+    const controls = document.getElementById('selection-controls');
+    if (['Active', 'Standby', 'Backup'].includes(data.currentUser.status)) {
+      controls.classList.remove('hidden');
+      const rules = document.getElementById('selection-rules');
+      if (data.currentRound === 1) {
+        rules.textContent = "Round 1: You may select exactly ONE week (Prime or Non-Prime).";
+      } else {
+        rules.textContent = "Round " + data.currentRound + ": Select one Prime week, or up to two Non-Prime weeks.";
+      }
+      this.updateSelectionSummaryUI();
+    } else {
+      controls.classList.add('hidden');
+    }
+  },
+
+  // ---------------------------------------------------------
+  // Interaction Logic
+  // ---------------------------------------------------------
+  login: function() {
+    const name = document.getElementById('login-name').value;
+    const pin = document.getElementById('login-pin').value;
+    const btn = document.getElementById('login-btn');
+
+    if (!name || !pin) return;
+
+    btn.disabled = true;
+    btn.textContent = "Checking...";
+
+    google.script.run
+      .withSuccessHandler((res) => {
+        btn.disabled = false;
+        btn.textContent = "Log In";
+        if (res === "Success") {
+          appState.currentUserName = name;
+          this.renderAuthNav();
+          this.fetchDashboardData();
+          this.showToast("Logged in successfully.");
+          // Do not store PIN
+        } else {
+          this.showToast("Invalid PIN.", true);
+        }
+      })
+      .withFailureHandler((err) => {
+        btn.disabled = false;
+        btn.textContent = "Log In";
+        this.showToast("Error: " + err.message, true);
+      })
+      .verifyUser(name, pin);
+  },
+
+  setFilter: function(filter) {
+    appState.activeFilter = filter;
+
+    const chips = document.querySelectorAll('.chip');
+    chips.forEach(c => {
+      if (c.dataset.filter === filter) {
+        c.classList.add('active');
+        c.setAttribute('aria-checked', 'true');
+      } else {
+        c.classList.remove('active');
+        c.setAttribute('aria-checked', 'false');
+      }
+    });
+
+    this.renderCalendar();
+  },
+
+  updateHighlighter: function() {
+    appState.highlightName = document.getElementById('highlighter-select').value;
+    this.renderCalendar();
+  },
+
+  // ---------------------------------------------------------
+  // Bottom Sheet Picker Logic
+  // ---------------------------------------------------------
+  openPrimaryPicker: function() {
+    const data = appState.dashboardData;
+    if (!data) return;
+
+    appState.sheetMode = 'primary';
+    document.getElementById('sheet-title').textContent = "Choose your week";
+
+    this.renderPickerBody(data.availableWeeks, appState.pendingWeek1);
+    this.openSheet();
+  },
+
+  openSecondaryPicker: function() {
+    const data = appState.dashboardData;
+    if (!data) return;
+
+    appState.sheetMode = 'secondary';
+    document.getElementById('sheet-title').textContent = "Add second non-prime week";
+
+    // Filter to only non-prime, and exclude week 1
+    const available = data.availableWeeks.filter(w =>
+      w.classification === 'Non-Prime' &&
+      w.valueDate !== (appState.pendingWeek1 ? appState.pendingWeek1.valueDate : null)
+    );
+
+    this.renderPickerBody(available, appState.pendingWeek2);
+    this.openSheet();
+  },
+
+  renderPickerBody: function(weeks, selectedItem) {
+    const body = document.getElementById('sheet-body');
+    body.innerHTML = '';
+
+    if (weeks.length === 0) {
+      body.innerHTML = '<p style="padding: 1.5rem;">No weeks available.</p>';
+      this.updateSheetFooter(null);
+      return;
+    }
+
+    weeks.forEach(w => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'picker-row';
+
+      const isSelected = selectedItem && selectedItem.valueDate === w.valueDate;
+      if (isSelected) btn.classList.add('selected');
+
+      const info = document.createElement('div');
+      info.className = 'picker-row-info';
+
+      const title = document.createElement('div');
+      title.className = 'picker-row-date';
+      title.textContent = `${w.classification === 'Prime' ? 'Prime: ' : ''}${w.displayDate}`;
+
+      const meta = document.createElement('div');
+      meta.className = 'picker-row-meta';
+      meta.textContent = `${w.spotsRemaining} spots left`;
+
+      info.appendChild(title);
+      info.appendChild(meta);
+
+      const radio = document.createElement('div');
+      radio.className = 'picker-radio';
+
+      btn.appendChild(info);
+      btn.appendChild(radio);
+
+      btn.onclick = () => {
+        // Clear previous visual selection
+        Array.from(body.children).forEach(c => c.classList.remove('selected'));
+        btn.classList.add('selected');
+
+        // Update state but do not submit
+        if (appState.sheetMode === 'primary') {
+          appState.pendingWeek1 = w;
+          // If they changed primary, clear secondary
+          appState.pendingWeek2 = null;
+        } else {
+          appState.pendingWeek2 = w;
+        }
+
+        this.updateSheetFooter(w);
+      };
+
+      body.appendChild(btn);
+    });
+
+    this.updateSheetFooter(selectedItem);
+  },
+
+  updateSheetFooter: function(selectedItem) {
+    const footer = document.getElementById('sheet-footer');
+    const text = document.getElementById('sheet-footer-text');
+    const continueBtn = document.getElementById('sheet-continue-btn');
+    const addSecondBtn = document.getElementById('sheet-add-second-btn');
+
+    footer.classList.remove('hidden');
+
+    if (!selectedItem) {
+      text.textContent = "Selected: None";
+      continueBtn.disabled = true;
+      addSecondBtn.classList.add('hidden');
+      return;
+    }
+
+    continueBtn.disabled = false;
+    text.textContent = `Selected: ${selectedItem.displayDate}`;
+
+    // Logic for "Add second"
+    addSecondBtn.classList.add('hidden');
+    continueBtn.textContent = "Continue";
+
+    if (appState.sheetMode === 'primary') {
+      const isRound1 = appState.dashboardData.currentRound === 1;
+      if (!isRound1 && selectedItem.classification === 'Non-Prime') {
+        addSecondBtn.classList.remove('hidden');
+      }
+    } else if (appState.sheetMode === 'secondary') {
+      continueBtn.textContent = "Review both weeks";
+    }
+  },
+
+  handleSheetContinue: function() {
+    this.closeSheet();
+    this.updateSelectionSummaryUI();
+  },
+
+  openSheet: function() {
+    const sheet = document.getElementById('bottom-sheet');
+    sheet.style.display = 'flex';
+    // Trigger reflow
+    void sheet.offsetWidth;
+    sheet.classList.add('visible');
+    // Set focus
+    setTimeout(() => {
+      document.querySelector('.modal-close-btn').focus();
+    }, 300);
+  },
+
+  closeSheet: function() {
+    const sheet = document.getElementById('bottom-sheet');
+    sheet.classList.remove('visible');
+    setTimeout(() => {
+      sheet.style.display = 'none';
+      if (appState.sheetMode) {
+        document.getElementById('start-selection-btn').focus();
+      }
+    }, 300);
+  },
+
+  updateSelectionSummaryUI: function() {
+    const summaryContainer = document.getElementById('pending-selection-summary');
+    const btn = document.getElementById('start-selection-btn');
+    const list = document.getElementById('pending-weeks-list');
+
+    if (!appState.pendingWeek1) {
+      summaryContainer.classList.add('hidden');
+      btn.classList.remove('hidden');
+      return;
+    }
+
+    btn.classList.add('hidden');
+    summaryContainer.classList.remove('hidden');
+
+    list.innerHTML = '';
+
+    // Week 1
+    const w1 = document.createElement('div');
+    w1.textContent = `1. ${appState.pendingWeek1.displayDate} (${appState.pendingWeek1.classification})`;
+    list.appendChild(w1);
+
+    // Week 2
+    if (appState.pendingWeek2) {
+      const w2 = document.createElement('div');
+      w2.textContent = `2. ${appState.pendingWeek2.displayDate} (${appState.pendingWeek2.classification})`;
+      list.appendChild(w2);
+
+      const warn = document.createElement('div');
+      warn.className = 'text-small';
+      warn.style.color = 'var(--limited-text)';
+      warn.style.marginTop = '0.5rem';
+      warn.textContent = "⚠️ Submitting two weeks will forfeit your next scheduled turn.";
+      list.appendChild(warn);
+    }
+  },
+
+  resetSelection: function() {
+    appState.pendingWeek1 = null;
+    appState.pendingWeek2 = null;
+    this.updateSelectionSummaryUI();
+  },
+
+  submitSelection: function() {
+    if (!appState.pendingWeek1) return;
+
+    const btn = document.getElementById('submit-selection-btn');
+    btn.disabled = true;
+    btn.textContent = "Submitting...";
+
+    const payload = {
+      name: appState.currentUserName,
+      week1: appState.pendingWeek1.valueDate,
+      week2: appState.pendingWeek2 ? appState.pendingWeek2.valueDate : null
+    };
+
+    google.script.run
+      .withSuccessHandler((res) => {
+        btn.disabled = false;
+        btn.textContent = "Confirm Selection";
+        if (res.success) {
+          this.showToast(res.message);
+          this.resetSelection();
+          // Refresh both datasets in place
+          this.fetchDashboardData();
+          this.fetchPublicData();
+        } else {
+          this.showToast("Error: " + res.message, true);
+        }
+      })
+      .withFailureHandler((err) => {
+        btn.disabled = false;
+        btn.textContent = "Confirm Selection";
+        this.showToast("System Error: " + err.message, true);
+      })
+      .processSelection(payload);
+  },
+
+  // ---------------------------------------------------------
+  // Utilities
+  // ---------------------------------------------------------
+  showToast: function(message, isError = false) {
+    const container = document.getElementById('toast-container');
+    const toast = document.createElement('div');
+    toast.className = 'toast';
+    if (isError) toast.classList.add('error');
+
+    // Icon
+    const icon = document.createElement('span');
+    icon.textContent = isError ? '❌' : '✅';
+    toast.appendChild(icon);
+
+    // Text
+    const text = document.createElement('span');
+    text.textContent = message;
+    toast.appendChild(text);
+
+    container.appendChild(toast);
+
+    // Trigger reflow
+    void toast.offsetWidth;
+    toast.classList.add('show');
+
+    setTimeout(() => {
+      toast.classList.remove('show');
+      setTimeout(() => {
+        if (container.contains(toast)) container.removeChild(toast);
+      }, 300);
+    }, 4000);
+  },
+
+  getTimeOfDay: function() {
+    const hour = new Date().getHours();
+    if (hour < 12) return 'morning';
+    if (hour < 17) return 'afternoon';
+    return 'evening';
+  }
+};
+
+// Expose strictly what is needed to HTML handlers
+window.appFunctions = appFunctions;
+
+// Init on load
+document.addEventListener('DOMContentLoaded', () => {
+  appFunctions.init();
+});
+</script>
