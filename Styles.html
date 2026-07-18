@@ -1,5 +1,6 @@
 <style>
-:root {
+:root,
+html[data-theme="boring"] {
   --bg-color: #F6F7FA;
   --surface-main: #FFFFFF;
   --text-primary: #171A22;
@@ -23,6 +24,54 @@
   --skeleton-bg: #E2E8F0;
 }
 
+html[data-theme="anesthesia"] {
+  --bg-color: #E6F3F7;
+  --surface-main: #FFFFFF;
+  --text-primary: #1B2C33;
+  --text-secondary: #566E7A;
+  --accent-color: #039BE5; /* Light narcotic blue */
+  --accent-hover: #0277BD;
+  --prime-tint: #FFF59D; /* Yellow */
+  --prime-text: #F57F17;
+  --available-tint: #A5D6A7; /* Green */
+  --available-text: #1B5E20;
+  --limited-tint: #FFCC80; /* Orange */
+  --limited-text: #E65100;
+  --full-tint: #EF9A9A; /* Fluorescent red/coral */
+  --full-text: #B71C1C;
+  --border-radius: 18px;
+  --border-color: rgba(0,0,0,0.08);
+  --shadow-subtle: 0 4px 12px rgba(3, 155, 229, 0.08);
+  --shadow-modal: 0 20px 40px rgba(3, 155, 229, 0.15);
+  --disabled-bg: #CFD8DC;
+  --disabled-text: #78909C;
+  --skeleton-bg: #B0BEC5;
+}
+
+html[data-theme="ketamine"] {
+  --bg-color: #1A0B2E;
+  --surface-main: #2A1149;
+  --text-primary: #E0E0E0;
+  --text-secondary: #BDBDBD;
+  --accent-color: #D500F9; /* High-energy violet */
+  --accent-hover: #AA00FF;
+  --prime-tint: #C6FF00; /* Bright neon yellow */
+  --prime-text: #000000;
+  --available-tint: #00E5FF; /* Electric cyan */
+  --available-text: #000000;
+  --limited-tint: #FF3D00; /* Hot orange */
+  --limited-text: #000000;
+  --full-tint: #FF1744; /* Fluorescent coral/red */
+  --full-text: #000000;
+  --border-radius: 18px;
+  --border-color: rgba(255,255,255,0.15);
+  --shadow-subtle: 0 4px 12px rgba(213, 0, 249, 0.2);
+  --shadow-modal: 0 20px 40px rgba(213, 0, 249, 0.4);
+  --disabled-bg: #4A148C;
+  --disabled-text: #9C27B0;
+  --skeleton-bg: #7B1FA2;
+}
+
 @media (prefers-reduced-motion: reduce) {
   * {
     animation-duration: 0.01ms !important;
@@ -39,6 +88,122 @@ body {
   margin: 0;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+}
+
+/* Theme Selector UI */
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.theme-segment-container {
+  display: none;
+  background-color: var(--bg-color);
+  border-radius: 9999px;
+  padding: 0.25rem;
+  border: 1px solid var(--border-color);
+}
+
+@media (min-width: 768px) {
+  .theme-segment-container {
+    display: flex;
+  }
+  .theme-mobile-btn {
+    display: none !important;
+  }
+}
+
+.theme-segment-btn {
+  background: transparent;
+  border: none;
+  border-radius: 9999px;
+  padding: 0.5rem 1rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.2s;
+  min-height: 36px; /* slightly smaller than standard for compact header */
+  width: auto;
+}
+
+.theme-segment-btn:hover {
+  color: var(--text-primary);
+}
+
+.theme-segment-btn.active {
+  background-color: var(--surface-main);
+  color: var(--text-primary);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+
+/* Mobile Theme Menu */
+.theme-mobile-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  min-height: 48px;
+  width: auto;
+}
+
+.theme-mobile-btn:hover {
+  background-color: var(--bg-color);
+}
+
+.theme-menu-popover {
+  position: absolute;
+  top: 100%;
+  right: 1.5rem;
+  margin-top: 0.5rem;
+  background-color: var(--surface-main);
+  border-radius: 12px;
+  box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+  border: 1px solid var(--border-color);
+  padding: 0.5rem;
+  display: none;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 150px;
+  z-index: 50; /* Ensure it's above other elements but below modals */
+}
+
+.theme-menu-popover.visible {
+  display: flex;
+}
+
+.theme-menu-item {
+  background: transparent;
+  border: none;
+  text-align: left;
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--text-primary);
+  cursor: pointer;
+  min-height: 44px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+}
+
+.theme-menu-item:hover {
+  background-color: var(--bg-color);
+}
+
+.theme-menu-item.active {
+  background-color: var(--accent-color);
+  color: #fff;
 }
 
 /* Layout Containers */

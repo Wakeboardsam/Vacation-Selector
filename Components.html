@@ -1,7 +1,26 @@
 <!-- App Header -->
 <header class="app-header">
   <h1 class="app-title">Vacation Selection</h1>
-  <button type="button" id="nav-toggle" class="auth-nav-link">Login</button>
+  <div class="header-actions">
+    <!-- Desktop Segmented Control -->
+    <div class="theme-segment-container" role="radiogroup" aria-label="Select Theme">
+      <button type="button" class="theme-segment-btn" role="radio" aria-checked="false" data-theme-val="boring" onclick="window.appFunctions.setTheme('boring')">💉 Boring</button>
+      <button type="button" class="theme-segment-btn" role="radio" aria-checked="false" data-theme-val="anesthesia" onclick="window.appFunctions.setTheme('anesthesia')">💉 Anesthesia</button>
+      <button type="button" class="theme-segment-btn" role="radio" aria-checked="false" data-theme-val="ketamine" onclick="window.appFunctions.setTheme('ketamine')">💉 Ketamine</button>
+    </div>
+
+    <!-- Mobile Popover Button -->
+    <button type="button" class="theme-mobile-btn" id="theme-mobile-toggle" aria-haspopup="true" aria-expanded="false" onclick="window.appFunctions.toggleThemeMenu()">
+      💉 Theme
+    </button>
+    <div class="theme-menu-popover" id="theme-menu-popover" role="menu" aria-label="Theme menu">
+      <button type="button" class="theme-menu-item" role="menuitem" data-theme-val="boring" onclick="window.appFunctions.setTheme('boring')">Boring <span></span></button>
+      <button type="button" class="theme-menu-item" role="menuitem" data-theme-val="anesthesia" onclick="window.appFunctions.setTheme('anesthesia')">Anesthesia <span></span></button>
+      <button type="button" class="theme-menu-item" role="menuitem" data-theme-val="ketamine" onclick="window.appFunctions.setTheme('ketamine')">Ketamine <span></span></button>
+    </div>
+
+    <button type="button" id="nav-toggle" class="auth-nav-link">Login</button>
+  </div>
 </header>
 
 <main class="main-container">

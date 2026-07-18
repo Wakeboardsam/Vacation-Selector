@@ -27,6 +27,28 @@ const appFunctions = {
       }
     });
 
+    // Close theme menu on outside click or Escape
+    document.addEventListener('click', (e) => {
+      const popover = document.getElementById('theme-menu-popover');
+      const toggleBtn = document.getElementById('theme-mobile-toggle');
+      if (popover && popover.classList.contains('visible')) {
+        if (!popover.contains(e.target) && !toggleBtn.contains(e.target)) {
+          this.closeThemeMenu();
+        }
+      }
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        const popover = document.getElementById('theme-menu-popover');
+        if (popover && popover.classList.contains('visible')) {
+          this.closeThemeMenu();
+        }
+      }
+    });
+
+    // Initialize UI state for Theme Selector
+    this.updateThemeUI();
+
     // Toggle logic for Login vs Public
     document.getElementById('nav-toggle').addEventListener('click', () => {
       if (appState.currentUserName) {
@@ -123,7 +145,19 @@ const appFunctions = {
     }
 
     const activeUsers = data.turnQueue.filter(p => ['Active', 'Standby', 'Backup'].includes(p.status));
-    let nextUpUsers = data.turnQueue.filter(p => p.status === 'Waiting').slice(0, 5);
+
+    // Find the max index in turnQueue of any Active, Standby, or Backup participant
+    let maxActionableIndex = -1;
+    data.turnQueue.forEach((p, index) => {
+      if (['Active', 'Standby', 'Backup'].includes(p.status)) {
+        maxActionableIndex = index;
+      }
+    });
+
+    let nextUpUsers = [];
+    if (maxActionableIndex !== -1) {
+      nextUpUsers = data.turnQueue.filter((p, index) => p.status === 'Waiting' && index > maxActionableIndex).slice(0, 5);
+    }
 
     const roundHeader = document.createElement('h3');
     roundHeader.textContent = `Round ${data.currentRound} Window`;
@@ -156,12 +190,12 @@ const appFunctions = {
       content.appendChild(item);
     });
 
-    if (nextUpUsers.length > 0) {
-      const nextHeader = document.createElement('h3');
-      nextHeader.style.marginTop = '1rem';
-      nextHeader.textContent = "Next Up";
-      content.appendChild(nextHeader);
+    const nextHeader = document.createElement('h3');
+    nextHeader.style.marginTop = '1rem';
+    nextHeader.textContent = "Next Up";
+    content.appendChild(nextHeader);
 
+    if (nextUpUsers.length > 0) {
       const nextList = document.createElement('div');
       nextUpUsers.forEach(p => {
         const d = document.createElement('div');
@@ -171,6 +205,12 @@ const appFunctions = {
         nextList.appendChild(d);
       });
       content.appendChild(nextList);
+    } else {
+      const endOfRound = document.createElement('div');
+      endOfRound.className = 'text-small';
+      endOfRound.style.marginBottom = '0.25rem';
+      endOfRound.textContent = 'End of current round';
+      content.appendChild(endOfRound);
     }
   },
 
@@ -719,6 +759,75 @@ const appFunctions = {
         this.showToast("System Error: " + err.message, true);
       })
       .processSelection(payload);
+  },
+
+  // ---------------------------------------------------------
+  // Theme Methods
+  // ---------------------------------------------------------
+  setTheme: function(themeValue) {
+    if (['boring', 'anesthesia', 'ketamine'].includes(themeValue)) {
+      try {
+        localStorage.setItem('vacationSelectorTheme', themeValue);
+      } catch (e) {
+        console.warn("Could not save theme to localStorage", e);
+      }
+      document.documentElement.setAttribute('data-theme', themeValue);
+      this.updateThemeUI();
+      this.closeThemeMenu();
+    }
+  },
+
+  updateThemeUI: function() {
+    let currentTheme = 'boring';
+    try {
+      currentTheme = localStorage.getItem('vacationSelectorTheme') || 'boring';
+    } catch (e) {
+      // ignore
+    }
+
+    // Update segmented control
+    document.querySelectorAll('.theme-segment-btn').forEach(btn => {
+      if (btn.getAttribute('data-theme-val') === currentTheme) {
+        btn.classList.add('active');
+        btn.setAttribute('aria-checked', 'true');
+      } else {
+        btn.classList.remove('active');
+        btn.setAttribute('aria-checked', 'false');
+      }
+    });
+
+    // Update mobile menu items
+    document.querySelectorAll('.theme-menu-item').forEach(btn => {
+      const isSelected = btn.getAttribute('data-theme-val') === currentTheme;
+      if (isSelected) {
+        btn.classList.add('active');
+        btn.querySelector('span').textContent = '✓';
+      } else {
+        btn.classList.remove('active');
+        btn.querySelector('span').textContent = '';
+      }
+    });
+  },
+
+  toggleThemeMenu: function() {
+    const popover = document.getElementById('theme-menu-popover');
+    const toggleBtn = document.getElementById('theme-mobile-toggle');
+    if (popover.classList.contains('visible')) {
+      this.closeThemeMenu();
+    } else {
+      popover.classList.add('visible');
+      toggleBtn.setAttribute('aria-expanded', 'true');
+    }
+  },
+
+  closeThemeMenu: function() {
+    const popover = document.getElementById('theme-menu-popover');
+    const toggleBtn = document.getElementById('theme-mobile-toggle');
+    if (popover && popover.classList.contains('visible')) {
+      popover.classList.remove('visible');
+      toggleBtn.setAttribute('aria-expanded', 'false');
+      toggleBtn.focus();
+    }
   },
 
   // ---------------------------------------------------------
