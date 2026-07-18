@@ -200,6 +200,189 @@
       }
       .badge-prime { background-color: var(--prime-bg); color: var(--prime-text); }
       .badge-nonprime { background-color: #e5e7eb; color: var(--text-color); }
+
+      /* Custom Picker Modal Styles */
+      .picker-trigger {
+        width: 100%;
+        padding: 0.75rem 1rem;
+        margin: 0.5rem 0 1.25rem 0;
+        border-radius: 0.375rem;
+        border: 1px solid var(--border-color);
+        background-color: #f9fafb;
+        font-size: 16px;
+        color: var(--text-color);
+        box-sizing: border-box;
+        transition: border-color 0.2s, box-shadow 0.2s;
+        text-align: left;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        min-height: 48px;
+      }
+
+      .picker-trigger:focus {
+        outline: none;
+        border-color: var(--primary-color);
+        box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
+        background-color: #ffffff;
+      }
+
+      .picker-trigger:disabled {
+        background-color: #e5e7eb;
+        color: var(--text-light);
+        cursor: not-allowed;
+      }
+
+      .picker-trigger-icon {
+        border: solid var(--text-light);
+        border-width: 0 2px 2px 0;
+        display: inline-block;
+        padding: 3px;
+        transform: rotate(45deg);
+        -webkit-transform: rotate(45deg);
+      }
+
+      .modal-backdrop {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100vw;
+        height: 100vh;
+        background-color: rgba(0, 0, 0, 0.5);
+        display: none;
+        justify-content: center;
+        align-items: center;
+        z-index: 1000;
+      }
+
+      .modal-panel {
+        background-color: var(--card-bg);
+        border-radius: 0.5rem;
+        width: 90%;
+        max-width: 500px;
+        max-height: 80vh;
+        display: flex;
+        flex-direction: column;
+        box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+      }
+
+      .modal-header {
+        padding: 1rem;
+        border-bottom: 1px solid var(--border-color);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+
+      .modal-header h3 {
+        margin: 0;
+        font-size: 1.25rem;
+      }
+
+      .modal-close-btn {
+        background: none;
+        border: none;
+        font-size: 1.5rem;
+        cursor: pointer;
+        color: var(--text-light);
+        padding: 0;
+        margin: 0;
+        width: auto;
+        line-height: 1;
+      }
+
+      .modal-close-btn:hover {
+        background: none;
+        color: var(--text-color);
+      }
+
+      .modal-body {
+        padding: 0;
+        overflow-y: auto;
+      }
+
+      .picker-section-title {
+        padding: 0.75rem 1rem 0.25rem;
+        font-size: 0.875rem;
+        font-weight: 600;
+        color: var(--text-light);
+        text-transform: uppercase;
+        background-color: #f9fafb;
+        position: sticky;
+        top: 0;
+        z-index: 1;
+      }
+
+      .picker-row {
+        width: 100%;
+        text-align: left;
+        background: none;
+        border: none;
+        border-bottom: 1px solid var(--border-color);
+        padding: 0.75rem 1rem;
+        min-height: 48px;
+        display: flex;
+        align-items: center;
+        border-radius: 0;
+        margin: 0;
+        color: var(--text-color);
+        font-size: 16px;
+      }
+
+      .picker-row:last-child {
+        border-bottom: none;
+      }
+
+      .picker-row:hover, .picker-row:focus {
+        background-color: #f3f4f6;
+      }
+
+      .picker-radio-circle {
+        width: 20px;
+        height: 20px;
+        border-radius: 50%;
+        border: 2px solid var(--border-color);
+        margin-right: 1rem;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        flex-shrink: 0;
+      }
+
+      .picker-row[aria-selected="true"] .picker-radio-circle {
+        border-color: var(--primary-color);
+      }
+
+      .picker-row[aria-selected="true"] .picker-radio-circle::after {
+        content: '';
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background-color: var(--primary-color);
+      }
+
+      .picker-row-content {
+        display: flex;
+        justify-content: space-between;
+        width: 100%;
+      }
+
+      .picker-row-spots {
+        color: var(--text-light);
+        font-size: 0.875rem;
+      }
+
+      @media (max-width: 600px) {
+        .modal-backdrop {
+          align-items: flex-end;
+        }
+        .modal-panel {
+          width: 100%;
+          max-width: none;
+          border-bottom-left-radius: 0;
+          border-bottom-right-radius: 0;
+        }
+      }
     </style>
   </head>
   <body>
@@ -382,46 +565,48 @@
         }
       }
 
-      function createWeekSelect(id, weeks, placeholderText, isWeek2 = false, currentRound = 1) {
-        const select = document.createElement("select");
-        select.id = id;
-        select.style.width = "100%";
+      // Store weeks globally for the custom picker to access
+      let globalWeeksData = { prime: [], nonPrime: [], currentRound: 1 };
 
-        const placeholder = document.createElement("option");
-        placeholder.value = "";
-        placeholder.textContent = placeholderText;
-        select.add(placeholder);
+      function createWeekTrigger(id, placeholderText, isWeek2 = false) {
+        // Container for hidden input and trigger button
+        const container = document.createElement("div");
 
-        weeks.forEach(week => {
-          const option = document.createElement("option");
-          option.value = String(week.valueDate);
-          if (week.classification) {
-            option.dataset.type = week.classification;
-          }
-          // Do not include classification prefix for week2 as all options are Non-Prime
-          const prefix = (!isWeek2 && week.classification) ? `${week.classification} — ` : "";
-          option.textContent =
-            `${prefix}${week.displayDate} ` +
-            `(${week.spotsRemaining} spots left)`;
-          select.add(option);
+        // Hidden input to store the timestamp
+        const hiddenInput = document.createElement("input");
+        hiddenInput.type = "hidden";
+        hiddenInput.id = id;
+        hiddenInput.value = "";
+
+        // Data type attribute for handling logic
+        hiddenInput.dataset.type = "";
+
+        // Trigger button
+        const button = document.createElement("button");
+        button.type = "button";
+        button.id = `${id}-trigger`;
+        button.className = "picker-trigger";
+
+        const textSpan = document.createElement("span");
+        textSpan.id = `${id}-text`;
+        textSpan.textContent = placeholderText;
+        button.appendChild(textSpan);
+
+        const iconSpan = document.createElement("span");
+        iconSpan.className = "picker-trigger-icon";
+        button.appendChild(iconSpan);
+
+        button.addEventListener("click", () => {
+          openPicker(id, isWeek2);
         });
 
-        if (id === "week1") {
-          select.addEventListener("change", () => {
-            handleWeek1Change(select, currentRound);
-          });
-        } else if (id === "week2") {
-          select.addEventListener("change", () => {
-            handleWeek2Change();
-          });
-        }
-
-        return select;
+        container.appendChild(hiddenInput);
+        container.appendChild(button);
+        return container;
       }
 
       function buildSelectionForm(weeks, currentRound) {
         const formDiv = document.getElementById("selection-area");
-        // Clear previous content just in case
         formDiv.innerHTML = "";
 
         const invalidClassifications = weeks.filter(w => w.classification === null);
@@ -439,6 +624,13 @@
         const primeWeeks = weeks.filter(w => w.classification === 'Prime');
         const nonPrimeWeeks = weeks.filter(w => w.classification === 'Non-Prime');
 
+        // Store for picker to use later
+        globalWeeksData = {
+          prime: primeWeeks,
+          nonPrime: nonPrimeWeeks,
+          currentRound: currentRound
+        };
+
         let headerHTML = `<h3>Your Turn to Select!</h3>`;
         if (currentRound === 1) {
             headerHTML += `<p><b>Rule Reminder:</b> Round 1 allows for exactly ONE week selection only (Prime or Non-Prime).</p>`;
@@ -451,26 +643,22 @@
 
         // Week 1
         const week1Label = document.createElement("label");
-        week1Label.setAttribute("for", "week1");
+        week1Label.setAttribute("for", "week1-trigger");
         week1Label.textContent = "Primary Week Selection:";
         formDiv.appendChild(week1Label);
 
-        // Keep existing order: Prime first, then Non-Prime
-        const orderedWeeks = primeWeeks.concat(nonPrimeWeeks);
-        const week1Select = createWeekSelect("week1", orderedWeeks, "-- Choose a week --", false, currentRound);
-        formDiv.appendChild(week1Select);
-
-        console.log("week1 options:", week1Select.options.length);
+        const week1Trigger = createWeekTrigger("week1", "-- Choose a week --", false);
+        formDiv.appendChild(week1Trigger);
 
         // Week 2
         if (currentRound !== 1) {
             const week2Label = document.createElement("label");
-            week2Label.setAttribute("for", "week2");
+            week2Label.setAttribute("for", "week2-trigger");
             week2Label.textContent = "Additional Non-Prime Week (optional):";
             formDiv.appendChild(week2Label);
 
-            const week2Select = createWeekSelect("week2", nonPrimeWeeks, "-- No second week --", true);
-            formDiv.appendChild(week2Select);
+            const week2Trigger = createWeekTrigger("week2", "-- No second week --", true);
+            formDiv.appendChild(week2Trigger);
 
             const week2Warning = document.createElement("p");
             week2Warning.id = "week2-warning";
@@ -486,37 +674,229 @@
         submitBtn.textContent = "Submit Selection";
         submitBtn.addEventListener("click", submitSelection);
         formDiv.appendChild(submitBtn);
-      }
-      
-      function handleWeek1Change(selectElement, currentRound) {
-          if (currentRound === 1) return; // Second week isn't shown anyway
-          const selectedOption = selectElement.options[selectElement.selectedIndex];
-          const weekType = selectedOption.getAttribute('data-type');
-          const week2Select = document.getElementById('week2');
-          const warningText = document.getElementById('week2-warning');
 
-          if (weekType === 'Prime') {
-              week2Select.value = "";
-              week2Select.disabled = true;
-              warningText.style.display = 'none';
-          } else {
-              week2Select.disabled = false;
-              if (week2Select.value !== "") {
-                  warningText.style.display = 'block';
-              } else {
-                  warningText.style.display = 'none';
-              }
+        // Add modal DOM structure if it doesn't exist
+        if (!document.getElementById("custom-picker-modal")) {
+          createModalDOM();
+        }
+      }
+
+      function createModalDOM() {
+        const backdrop = document.createElement("div");
+        backdrop.id = "custom-picker-modal";
+        backdrop.className = "modal-backdrop";
+        backdrop.setAttribute("role", "dialog");
+        backdrop.setAttribute("aria-modal", "true");
+
+        backdrop.innerHTML = `
+          <div class="modal-panel" id="custom-picker-panel">
+            <div class="modal-header">
+              <h3 id="custom-picker-title">Choose a week</h3>
+              <button class="modal-close-btn" id="custom-picker-close" aria-label="Close">&times;</button>
+            </div>
+            <div class="modal-body" id="custom-picker-body">
+              <!-- Content injected dynamically -->
+            </div>
+          </div>
+        `;
+
+        document.body.appendChild(backdrop);
+
+        // Event listeners for closing
+        backdrop.addEventListener("click", (e) => {
+          if (e.target === backdrop) {
+            closePicker();
           }
+        });
+
+        document.getElementById("custom-picker-close").addEventListener("click", closePicker);
+
+        document.addEventListener("keydown", (e) => {
+          if (e.key === "Escape" && backdrop.style.display === "flex") {
+            closePicker();
+          }
+        });
+      }
+
+      let activePickerId = null;
+
+      function openPicker(id, isWeek2) {
+        activePickerId = id;
+        const modal = document.getElementById("custom-picker-modal");
+        const body = document.getElementById("custom-picker-body");
+        const title = document.getElementById("custom-picker-title");
+
+        const currentValue = document.getElementById(id).value;
+
+        body.innerHTML = "";
+        title.textContent = isWeek2 ? "Choose second week" : "Choose a primary week";
+
+        if (isWeek2) {
+          // Add "No second week" choice
+          const row = document.createElement("button");
+          row.className = "picker-row";
+          row.setAttribute("role", "option");
+          row.setAttribute("aria-selected", currentValue === "" ? "true" : "false");
+          row.innerHTML = `
+            <div class="picker-radio-circle"></div>
+            <div class="picker-row-content">
+              <span>No second week</span>
+            </div>
+          `;
+          row.addEventListener("click", () => selectWeek(id, "", null, "-- No second week --"));
+          body.appendChild(row);
+
+          // Non-Prime section
+          if (globalWeeksData.nonPrime.length > 0) {
+            const section = document.createElement("div");
+            section.className = "picker-section-title";
+            section.textContent = "Non-Prime";
+            body.appendChild(section);
+
+            globalWeeksData.nonPrime.forEach(week => {
+              const weekRow = createPickerRow(id, week, currentValue, false);
+              body.appendChild(weekRow);
+            });
+          }
+        } else {
+          // Primary week options
+          if (globalWeeksData.prime.length > 0) {
+            const section = document.createElement("div");
+            section.className = "picker-section-title";
+            section.textContent = "Prime";
+            body.appendChild(section);
+
+            globalWeeksData.prime.forEach(week => {
+              const weekRow = createPickerRow(id, week, currentValue, true);
+              body.appendChild(weekRow);
+            });
+          }
+
+          if (globalWeeksData.nonPrime.length > 0) {
+            const section = document.createElement("div");
+            section.className = "picker-section-title";
+            section.textContent = "Non-Prime";
+            body.appendChild(section);
+
+            globalWeeksData.nonPrime.forEach(week => {
+              const weekRow = createPickerRow(id, week, currentValue, true);
+              body.appendChild(weekRow);
+            });
+          }
+        }
+
+        modal.style.display = "flex";
+      }
+
+      function createPickerRow(pickerId, week, currentValue, includePrefix) {
+        const row = document.createElement("button");
+        row.className = "picker-row";
+        row.setAttribute("role", "option");
+
+        const stringValue = String(week.valueDate);
+        row.setAttribute("aria-selected", currentValue === stringValue ? "true" : "false");
+
+        const prefix = (includePrefix && week.classification) ? `${week.classification} — ` : "";
+        const displayText = `${prefix}${week.displayDate}`;
+
+        // Use textContent to prevent XSS
+        const circle = document.createElement("div");
+        circle.className = "picker-radio-circle";
+
+        const contentDiv = document.createElement("div");
+        contentDiv.className = "picker-row-content";
+
+        const textSpan = document.createElement("span");
+        textSpan.textContent = displayText;
+
+        const spotsSpan = document.createElement("span");
+        spotsSpan.className = "picker-row-spots";
+        spotsSpan.textContent = `${week.spotsRemaining} spots left`;
+
+        contentDiv.appendChild(textSpan);
+        contentDiv.appendChild(spotsSpan);
+
+        row.appendChild(circle);
+        row.appendChild(contentDiv);
+
+        // Pass the short display text to update the trigger button
+        const buttonText = `${displayText} (${week.spotsRemaining} spots left)`;
+
+        row.addEventListener("click", () => {
+          selectWeek(pickerId, stringValue, week.classification, buttonText);
+        });
+
+        return row;
+      }
+
+      function closePicker() {
+        const modal = document.getElementById("custom-picker-modal");
+        modal.style.display = "none";
+        if (activePickerId) {
+          const trigger = document.getElementById(`${activePickerId}-trigger`);
+          if (trigger) trigger.focus();
+          activePickerId = null;
+        }
+      }
+
+      function selectWeek(pickerId, value, classification, displayText) {
+        // Update hidden input
+        const input = document.getElementById(pickerId);
+        input.value = value;
+        input.dataset.type = classification || "";
+
+        // Update trigger button text
+        const textSpan = document.getElementById(`${pickerId}-text`);
+        textSpan.textContent = displayText;
+
+        // Run logic for week 1 / week 2 dependencies
+        if (pickerId === "week1") {
+          handleWeek1Change();
+        } else if (pickerId === "week2") {
+          handleWeek2Change();
+        }
+
+        closePicker();
+      }
+
+      function handleWeek1Change() {
+        if (globalWeeksData.currentRound === 1) return; // Second week isn't shown
+
+        const week1Input = document.getElementById("week1");
+        const weekType = week1Input.dataset.type;
+        const week2Trigger = document.getElementById('week2-trigger');
+        const week2Input = document.getElementById('week2');
+        const warningText = document.getElementById('week2-warning');
+        const week2Text = document.getElementById('week2-text');
+
+        if (weekType === 'Prime') {
+          // Clear and disable week 2
+          week2Input.value = "";
+          week2Input.dataset.type = "";
+          week2Trigger.disabled = true;
+          week2Text.textContent = "Not available with a Prime week";
+          warningText.style.display = 'none';
+        } else {
+          // Enable week 2
+          week2Trigger.disabled = false;
+          if (week2Input.value === "") {
+            week2Text.textContent = "-- No second week --";
+            warningText.style.display = 'none';
+          } else {
+            warningText.style.display = 'block';
+          }
+        }
       }
 
       function handleWeek2Change() {
-          const week2Select = document.getElementById('week2');
-          const warningText = document.getElementById('week2-warning');
-          if (week2Select.value !== "") {
-              warningText.style.display = 'block';
-          } else {
-              warningText.style.display = 'none';
-          }
+        const week2Input = document.getElementById('week2');
+        const warningText = document.getElementById('week2-warning');
+
+        if (week2Input.value !== "") {
+          warningText.style.display = 'block';
+        } else {
+          warningText.style.display = 'none';
+        }
       }
 
       function submitSelection() {
@@ -528,8 +908,14 @@
           alert("Please select your primary week.");
           return;
         }
-        document.querySelector("#selection-area button").disabled = true;
-        document.querySelector("#selection-area button").textContent = "Submitting...";
+
+        // Find the correct submit button
+        const submitBtn = Array.from(document.querySelectorAll("#selection-area button")).pop();
+        if (submitBtn) {
+          submitBtn.disabled = true;
+          submitBtn.textContent = "Submitting...";
+        }
+
         const selectionData = { name: name, week1: week1, week2: (week2 === "" ? null : week2) };
         google.script.run
           .withSuccessHandler(function(result){
