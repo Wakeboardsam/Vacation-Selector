@@ -4,6 +4,20 @@
     <meta charset="utf-8">
     <title>Vacation Week Selection System</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <script>
+      (function() {
+        try {
+          var theme = localStorage.getItem('vacationSelectorTheme');
+          if (theme === 'anesthesia' || theme === 'ketamine') {
+            document.documentElement.setAttribute('data-theme', theme);
+          } else {
+            document.documentElement.setAttribute('data-theme', 'boring');
+          }
+        } catch (e) {
+          document.documentElement.setAttribute('data-theme', 'boring');
+        }
+      })();
+    </script>
     <?!= include('Styles'); ?>
   </head>
   <body>
