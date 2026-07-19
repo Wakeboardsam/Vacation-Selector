@@ -527,7 +527,7 @@ function getPublicCalendarData() {
     queuePosition: p.queuePosition,
     status: p.computedStatus
   }));
-  
+
   return {
       calendarData: calendarData,
       turnQueue: turnQueue,
@@ -713,7 +713,8 @@ function _processSelectionCore(selectionData) {
   const turnSheet = ss.getSheetByName('Turn Management');
   const weekSheet = ss.getSheetByName('Week Availability');
   const configSheet = ss.getSheetByName('Config');
-  // Inner lock removed, managed by wrapper
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
   try {
     let coreResult = null;
     const executeLogic = () => {
@@ -929,7 +930,9 @@ function _processSelectionCore(selectionData) {
     const createdRowIndices = computePendingNotifications(beforeWindow, afterWindow, afterRound, currentRound, afterWindowRaw);
     return { coreResult, createdRowIndices };
   } catch (e) {
-    return { coreResult: { success: false, message: "An error occurred: " + e.message } };
+    return { success: false, message: "An error occurred: " + e.message };
+  } finally {
+    lock.releaseLock();
   }
 }
 
@@ -1108,7 +1111,6 @@ function runTests() {
   testQueueWindowSkipNextTurn();
   testDashboardDataExtraction();
   runThemeColorTests();
-  runSmsTests();
 }
 
 function testRound1SelectableWeeks() {
@@ -1598,212 +1600,4 @@ function _processPendingNotifications(rowIndices) {
       if (errorIdx !== -1) logSheet.getRange(rowIdx, errorIdx + 1).setValue(result.error);
     }
   });
-}
-
-/**
- * Admin function to manually notify the current window
- */
-function sendCurrentWindowNotifications() {
-  if (!isSmsEnabled()) {
-    return "SMS notifications are disabled in configuration.";
-  }
-
-  const lock = LockService.getScriptLock();
-  lock.waitLock(30000);
-  let pendingRowIndices = [];
-  try {
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const configSheet = ss.getSheetByName('Config');
-    const turnSheet = ss.getSheetByName('Turn Management');
-    const currentRound = configSheet.getRange("B2").getValue();
-    const turnDataRaw = turnSheet.getDataRange().getValues();
-
-    // Simulate before window (empty) and after window (current) to trigger notifications for everyone in the window
-    const currentWindow = calculateQueueWindow(turnDataRaw, currentRound);
-
-    pendingRowIndices = computePendingNotifications([], currentWindow, currentRound, currentRound, turnDataRaw);
-  } finally {
-    lock.releaseLock();
-  }
-
-  if (pendingRowIndices && pendingRowIndices.length > 0) {
-    try {
-      _processPendingNotifications(pendingRowIndices);
-      return `Processed ${pendingRowIndices.length} notifications.`;
-    } catch (e) {
-      return "Error processing notifications: " + e.message;
-    }
-  }
-  return "No new notifications to send for the current window.";
-}
-
-/**
- * Admin function to send a test SMS explicitly bypassing some checks
- */
-function sendTestSms(name) {
-  const check = checkSmsConfiguration();
-  if (!check.valid) {
-    return "Cannot send test SMS: " + check.message;
-  }
-
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const turnSheet = ss.getSheetByName('Turn Management');
-  const turnData = turnSheet.getDataRange().getValues();
-  const tNameIdx = turnData[0].indexOf('Name');
-  const tPhoneIdx = turnData[0].indexOf('PhoneNumber');
-
-  if (tNameIdx === -1 || tPhoneIdx === -1) {
-    return "Phone number schema is not setup.";
-  }
-
-  const pRow = turnData.find(r => r[tNameIdx] === name);
-  if (!pRow) return "Participant not found.";
-
-  const phoneNum = String(pRow[tPhoneIdx] || '').trim();
-  if (!phoneNum) return "Participant has no phone number on record.";
-
-  const msg = "TEST MESSAGE: Vacation Week Selection SMS Configuration is working.";
-  const result = sendSmsViaTwilio(phoneNum, msg);
-
-  if (result.success) {
-    return "Test SMS sent successfully. SID: " + result.messageSid;
-  } else {
-    return "Test SMS failed: " + result.error;
-  }
-}
-
-// ============================================================================
-// SMS TESTS
-// ============================================================================
-
-function testSmsConfigurationValidation() {
-  const originalGet = _smsDependencies.getProperties;
-  try {
-    // Missing all
-    _smsDependencies.getProperties = () => ({});
-    if (checkSmsConfiguration().valid) throw new Error("Should fail when missing properties");
-
-    // Has all
-    _smsDependencies.getProperties = () => ({
-      TWILIO_ACCOUNT_SID: '123',
-      TWILIO_AUTH_TOKEN: '456',
-      TWILIO_FROM_NUMBER: '789',
-      VACATION_SELECTOR_URL: 'http://test.com'
-    });
-    if (!checkSmsConfiguration().valid) throw new Error("Should pass with all properties");
-
-    console.log("PASS: testSmsConfigurationValidation");
-  } finally {
-    _smsDependencies.getProperties = originalGet;
-  }
-}
-
-function testSmsEnabledFlag() {
-  const originalGet = _smsDependencies.getProperties;
-  try {
-    _smsDependencies.getProperties = () => ({ SMS_NOTIFICATIONS_ENABLED: 'true' });
-    if (!isSmsEnabled()) throw new Error("Should be enabled");
-
-    _smsDependencies.getProperties = () => ({ SMS_NOTIFICATIONS_ENABLED: 'False' });
-    if (isSmsEnabled()) throw new Error("Should be disabled");
-
-    console.log("PASS: testSmsEnabledFlag");
-  } finally {
-    _smsDependencies.getProperties = originalGet;
-  }
-}
-
-function testComputePendingNotifications() {
-  const originalGet = _smsDependencies.getProperties;
-  let ss;
-  const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
-  try {
-    _smsDependencies.getProperties = () => ({ SMS_NOTIFICATIONS_ENABLED: 'true' });
-
-    ss = SpreadsheetApp.create('Temp Test SS - SMS Notif');
-    SpreadsheetApp.getActiveSpreadsheet = () => ss;
-
-    // Missing Notification Log
-    const indices1 = computePendingNotifications([], [], 1, 1, []);
-    if (indices1.length > 0) throw new Error("Should handle missing log sheet safely");
-
-    ss.insertSheet('Notification Log').appendRow(['Timestamp', 'DedupeKey', 'ParticipantName', 'Round', 'CalculatedRole', 'Status']);
-
-    const beforeWindow = [
-      { name: 'P1', computedStatus: 'Active' },
-      { name: 'P2', computedStatus: 'Standby' }
-    ];
-
-    const afterWindow = [
-      { name: 'P1', computedStatus: 'Completed' },
-      { name: 'P2', computedStatus: 'Active' },
-      { name: 'P3', computedStatus: 'Standby' },
-      { name: 'P4', computedStatus: 'Backup' } // new entrants
-    ];
-
-    const turnHeaders = ['Name', 'PhoneNumber'];
-    const turnDataRaw = [
-      turnHeaders,
-      ['P1', '111'],
-      ['P2', '222'],
-      ['P3', '333'],
-      ['P4', '444'] // newly entered
-    ];
-
-    const indices2 = computePendingNotifications(beforeWindow, afterWindow, 1, 1, turnDataRaw);
-    if (indices2.length !== 2) throw new Error("Expected exactly 2 new notifications (for P3 and P4)");
-
-    // Deduplication check
-    const indices3 = computePendingNotifications(beforeWindow, afterWindow, 1, 1, turnDataRaw);
-    if (indices3.length !== 0) throw new Error("Should not create duplicates in same round");
-
-    console.log("PASS: testComputePendingNotifications");
-  } finally {
-    _smsDependencies.getProperties = originalGet;
-    SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
-    if (ss) {
-      const files = DriveApp.getFilesByName(ss.getName());
-      while (files.hasNext()) files.next().setTrashed(true);
-    }
-  }
-}
-
-function testProcessPendingNotificationsMissingPhone() {
-  const originalGet = _smsDependencies.getProperties;
-  let ss;
-  const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
-  try {
-    _smsDependencies.getProperties = () => ({ SMS_NOTIFICATIONS_ENABLED: 'true', VACATION_SELECTOR_URL: 'http' });
-    ss = SpreadsheetApp.create('Temp Test SS - Process SMS');
-    SpreadsheetApp.getActiveSpreadsheet = () => ss;
-
-    const logSheet = ss.insertSheet('Notification Log');
-    logSheet.appendRow(['Timestamp', 'DedupeKey', 'ParticipantName', 'Round', 'CalculatedRole', 'Status', 'TwilioMessageSid', 'Error']);
-    logSheet.appendRow(['', 'k1', 'NoPhonePerson', 1, 'Active', 'PENDING', '', '']);
-
-    const turnSheet = ss.insertSheet('Turn Management');
-    turnSheet.appendRow(['Name', 'PhoneNumber']);
-    turnSheet.appendRow(['NoPhonePerson', '']); // blank phone
-
-    _processPendingNotifications([2]); // row index 2
-
-    const status = logSheet.getRange(2, 6).getValue();
-    if (status !== 'SKIPPED_NO_PHONE') throw new Error("Should skip if no phone number");
-
-    console.log("PASS: testProcessPendingNotificationsMissingPhone");
-  } finally {
-    _smsDependencies.getProperties = originalGet;
-    SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
-    if (ss) {
-      const files = DriveApp.getFilesByName(ss.getName());
-      while (files.hasNext()) files.next().setTrashed(true);
-    }
-  }
-}
-
-function runSmsTests() {
-  testSmsConfigurationValidation();
-  testSmsEnabledFlag();
-  testComputePendingNotifications();
-  testProcessPendingNotificationsMissingPhone();
 }
