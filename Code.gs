@@ -1549,8 +1549,9 @@ function computePendingNotifications(beforeWindow, afterWindow, afterRound, curr
 function _processPendingNotifications(rowIndices) {
   if (!rowIndices || rowIndices.length === 0) return;
 
+  const configCheck = checkSmsConfiguration();
   const props = _smsDependencies.getProperties();
-  const vacationUrl = props['VACATION_SELECTOR_URL'] || 'https://example.com/vacation';
+  const vacationUrl = props['VACATION_SELECTOR_URL']; // No fallback
 
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const logSheet = ss.getSheetByName('Notification Log');
@@ -1588,6 +1589,12 @@ function _processPendingNotifications(rowIndices) {
     if (tNameIdx !== -1 && tPhoneIdx !== -1) {
       const pRow = turnData.find(r => r[tNameIdx] === pName);
       if (pRow) phoneNum = String(pRow[tPhoneIdx] || '').trim();
+    }
+
+    if (!configCheck.valid) {
+      logSheet.getRange(rowIdx, statusIdx + 1).setValue('FAILED');
+      if (errorIdx !== -1) logSheet.getRange(rowIdx, errorIdx + 1).setValue(configCheck.message);
+      return;
     }
 
     if (!phoneNum) {
@@ -1817,6 +1824,7 @@ function runSmsTests() {
   testComputePendingNotifications();
   testProcessPendingNotificationsMissingPhone();
   testProcessSelectionSmsIntegration();
+  testProcessPendingNotificationsMissingConfig();
 }
 
 function testProcessSelectionSmsIntegration() {
@@ -1871,6 +1879,59 @@ function testProcessSelectionSmsIntegration() {
     console.log("PASS: testProcessSelectionSmsIntegration");
   } finally {
     _smsDependencies.getProperties = originalGet;
+    SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
+    if (ss) {
+      const files = DriveApp.getFilesByName(ss.getName());
+      while (files.hasNext()) files.next().setTrashed(true);
+    }
+  }
+}
+
+function testProcessPendingNotificationsMissingConfig() {
+  const originalGet = _smsDependencies.getProperties;
+  const originalFetch = _smsDependencies.fetch;
+  let ss;
+  const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
+  let fetchCalled = false;
+
+  try {
+    // Missing VACATION_SELECTOR_URL
+    _smsDependencies.getProperties = () => ({
+      SMS_NOTIFICATIONS_ENABLED: 'true',
+      TWILIO_ACCOUNT_SID: '123',
+      TWILIO_AUTH_TOKEN: '456',
+      TWILIO_FROM_NUMBER: '789'
+    });
+
+    _smsDependencies.fetch = () => {
+       fetchCalled = true;
+       return { getResponseCode: () => 200, getContentText: () => '{}' };
+    };
+
+    ss = SpreadsheetApp.create('Temp Test SS - Config Missing');
+    SpreadsheetApp.getActiveSpreadsheet = () => ss;
+
+    const logSheet = ss.insertSheet('Notification Log');
+    logSheet.appendRow(['Timestamp', 'DedupeKey', 'ParticipantName', 'Round', 'CalculatedRole', 'Status', 'TwilioMessageSid', 'Error']);
+    logSheet.appendRow(['', 'k1', 'PersonWithPhone', 1, 'Active', 'PENDING', '', '']);
+
+    const turnSheet = ss.insertSheet('Turn Management');
+    turnSheet.appendRow(['Name', 'PhoneNumber']);
+    turnSheet.appendRow(['PersonWithPhone', '555-1234']);
+
+    _processPendingNotifications([2]); // row index 2
+
+    const status = logSheet.getRange(2, 6).getValue();
+    const errorMsg = logSheet.getRange(2, 8).getValue();
+
+    if (fetchCalled) throw new Error("Should not call Twilio fetch if config is invalid");
+    if (status !== 'FAILED') throw new Error("Status should be FAILED");
+    if (String(errorMsg).indexOf('Missing SMS configuration') === -1) throw new Error("Should log configuration error");
+
+    console.log("PASS: testProcessPendingNotificationsMissingConfig");
+  } finally {
+    _smsDependencies.getProperties = originalGet;
+    _smsDependencies.fetch = originalFetch;
     SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
     if (ss) {
       const files = DriveApp.getFilesByName(ss.getName());
