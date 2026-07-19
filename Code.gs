@@ -573,7 +573,42 @@ function setupSpreadsheetSchema() {
     modifications = true;
   }
 
-  return modifications ? "Schema updated successfully." : "Schema already up to date.";
+  // 4. Add PhoneNumber if missing
+  if (headers.indexOf('PhoneNumber') === -1) {
+    let newCol = headers.length + 1;
+    turnSheet.getRange(1, newCol).setValue('PhoneNumber');
+    headers.push('PhoneNumber');
+    modifications = true;
+  }
+
+  // 5. Setup Notification Log sheet
+  let logSheet = ss.getSheetByName('Notification Log');
+  let logModifications = false;
+  if (!logSheet) {
+    logSheet = ss.insertSheet('Notification Log');
+    logModifications = true;
+  }
+
+  const logHeaders = ['Timestamp', 'DedupeKey', 'ParticipantName', 'Round', 'CalculatedRole', 'Status', 'TwilioMessageSid', 'Error'];
+  let currentLogHeaders = [];
+  if (logSheet.getLastColumn() > 0) {
+     currentLogHeaders = logSheet.getRange(1, 1, 1, logSheet.getLastColumn()).getValues()[0];
+  }
+
+  for (let i = 0; i < logHeaders.length; i++) {
+     if (currentLogHeaders.indexOf(logHeaders[i]) === -1) {
+        logSheet.getRange(1, logSheet.getLastColumn() + 1 || 1).setValue(logHeaders[i]);
+        currentLogHeaders.push(logHeaders[i]);
+        logModifications = true;
+     }
+  }
+
+  if (logModifications) {
+      logSheet.setFrozenRows(1);
+      logSheet.getRange(1, 1, 1, logSheet.getLastColumn()).setFontWeight('bold').setBackground('#f3f4f6');
+  }
+
+  return (modifications || logModifications) ? "Schema updated successfully." : "Schema already up to date.";
 }
 
 function validateSchema(turnData, currentRound) {
@@ -648,16 +683,48 @@ function initializeLotteryRound() {
     return "Lottery Round 2 Initialized Successfully.";
 }
 
+
 function processSelection(selectionData) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const turnSheet = ss.getSheetByName('Turn Management');
-  const weekSheet = ss.getSheetByName('Week Availability');
-  const configSheet = ss.getSheetByName('Config');
   const lock = LockService.getScriptLock();
   lock.waitLock(30000);
+  let pendingRowIndices = [];
+  let finalResult = null;
   try {
+    const res = _processSelectionCore(selectionData);
+    finalResult = res.coreResult;
+    pendingRowIndices = res.createdRowIndices || [];
+  } finally {
+    lock.releaseLock();
+  }
+
+  if (pendingRowIndices && pendingRowIndices.length > 0) {
+    try {
+      _processPendingNotifications(pendingRowIndices);
+    } catch (e) {
+      console.error("SMS notification processing failed, but selection succeeded: " + e.message);
+    }
+  }
+
+  return finalResult;
+}
+
+function _processSelectionCore(selectionData) {
+  // Inner lock removed, managed by wrapper
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const turnSheet = ss.getSheetByName('Turn Management');
+    const weekSheet = ss.getSheetByName('Week Availability');
+    const configSheet = ss.getSheetByName('Config');
+
+    // Capture before state outside of the inner closure
+    const beforeRound = configSheet.getRange("B2").getValue();
+    const beforeWindowRaw = turnSheet.getDataRange().getValues();
+    const beforeWindow = calculateQueueWindow(beforeWindowRaw, beforeRound);
+
+    let coreResult = null;
+    const executeLogic = () => {
     const turnDataRaw = turnSheet.getDataRange().getValues();
-    const currentRound = configSheet.getRange("B2").getValue();
+    const currentRound = beforeRound;
 
     // Schema validation
     const schemaCheck = validateSchema(turnDataRaw, currentRound);
@@ -852,10 +919,27 @@ function processSelection(selectionData) {
     }
 
     return { success: true, message: "Selection recorded." };
+      }; // end executeLogic
+    coreResult = executeLogic();
+    if (!coreResult || !coreResult.success) {
+      return { coreResult: coreResult || { success: false, message: "Unknown error" }, createdRowIndices: [] };
+    }
+
+    // Success path: compute after window and generated notifications
+    const afterRound = configSheet.getRange("B2").getValue();
+    const afterWindowRaw = turnSheet.getDataRange().getValues();
+    const afterWindow = calculateQueueWindow(afterWindowRaw, afterRound);
+
+    let createdRowIndices = [];
+    try {
+      createdRowIndices = computePendingNotifications(beforeWindow, afterWindow, afterRound, beforeRound, afterWindowRaw);
+    } catch (err) {
+      console.error("Failed to compute pending notifications: " + err.message);
+      createdRowIndices = [];
+    }
+    return { coreResult, createdRowIndices };
   } catch (e) {
-    return { success: false, message: "An error occurred: " + e.message };
-  } finally {
-    lock.releaseLock();
+    return { coreResult: { success: false, message: "An error occurred: " + e.message } };
   }
 }
 
@@ -1034,6 +1118,7 @@ function runTests() {
   testQueueWindowSkipNextTurn();
   testDashboardDataExtraction();
   runThemeColorTests();
+  runSmsTests();
 }
 
 function testRound1SelectableWeeks() {
@@ -1250,4 +1335,607 @@ function runIntegrationTests() {
             }
         }
     }
+}
+
+// ============================================================================
+// SMS NOTIFICATIONS
+// ============================================================================
+
+/** Dependencies mapping for testing */
+const _smsDependencies = {
+  getProperties: () => PropertiesService.getScriptProperties().getProperties(),
+  fetch: (url, params) => UrlFetchApp.fetch(url, params)
+};
+
+/**
+ * Validates SMS configuration
+ * @returns {object} { valid: boolean, message: string }
+ */
+function checkSmsConfiguration() {
+  const props = _smsDependencies.getProperties();
+  const required = ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_FROM_NUMBER', 'VACATION_SELECTOR_URL'];
+  const missing = required.filter(key => !props[key] || String(props[key]).trim() === '');
+
+  if (missing.length > 0) {
+    return { valid: false, message: "Missing SMS configuration: " + missing.join(', ') };
+  }
+  return { valid: true, message: "SMS configuration is complete." };
+}
+
+/**
+ * Checks if SMS notifications are globally enabled
+ */
+function isSmsEnabled() {
+  const props = _smsDependencies.getProperties();
+  const val = String(props['SMS_NOTIFICATIONS_ENABLED'] || '').toLowerCase();
+  return val === 'true' || val === '1' || val === 'yes';
+}
+
+/**
+ * Sends an SMS via Twilio
+ * @param {string} to - E.164 phone number
+ * @param {string} body - SMS content
+ * @returns {object} { success: boolean, messageSid?: string, error?: string }
+ */
+function sendSmsViaTwilio(to, body) {
+  const props = _smsDependencies.getProperties();
+  const sid = props['TWILIO_ACCOUNT_SID'];
+  const token = props['TWILIO_AUTH_TOKEN'];
+  const from = props['TWILIO_FROM_NUMBER'];
+
+  if (!sid || !token || !from) {
+    return { success: false, error: "Missing Twilio credentials" };
+  }
+
+  const twilioUrl = `https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`;
+
+  const payload = {
+    "To": to,
+    "From": from,
+    "Body": body
+  };
+
+  const options = {
+    method: "post",
+    headers: {
+      "Authorization": "Basic " + Utilities.base64Encode(`${sid}:${token}`)
+    },
+    payload: payload,
+    muteHttpExceptions: true
+  };
+
+  try {
+    const response = _smsDependencies.fetch(twilioUrl, options);
+    const responseCode = response.getResponseCode();
+    const responseText = response.getContentText();
+
+    let responseJson = {};
+    try {
+      responseJson = JSON.parse(responseText);
+    } catch (e) {}
+
+    if (responseCode >= 200 && responseCode < 300) {
+      return { success: true, messageSid: responseJson.sid || "Unknown SID" };
+    } else {
+      return { success: false, error: `Twilio Error ${responseCode}: ${responseJson.message || responseText}` };
+    }
+  } catch (e) {
+    return { success: false, error: "Request failed: " + e.message };
+  }
+}
+
+/**
+ * Computes pending notifications for new entrants to the window.
+ * Writes PENDING rows to the Notification Log.
+ * Must be called under the script lock.
+ * @returns {number[]} Array of row indices created in the Notification Log
+ */
+function computePendingNotifications(beforeWindow, afterWindow, afterRound, currentRound, afterWindowRaw) {
+  if (!isSmsEnabled()) return [];
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const logSheet = ss.getSheetByName('Notification Log');
+  if (!logSheet) return []; // Schema not set up yet
+
+  const logData = logSheet.getDataRange().getValues();
+  const logHeaders = logData[0] || [];
+  const dedupeIdx = logHeaders.indexOf('DedupeKey');
+
+  // If no dedupe col, we can't safely notify
+  if (dedupeIdx === -1) return [];
+
+  // Get existing dedupe keys to prevent duplicates
+  const existingKeys = new Set();
+  for (let i = 1; i < logData.length; i++) {
+    if (logData[i][dedupeIdx]) {
+      existingKeys.add(String(logData[i][dedupeIdx]));
+    }
+  }
+
+  // Find participants who are in the Active, Standby, or Backup roles NOW
+  const targetRoles = ['Active', 'Standby', 'Backup'];
+  const newEntrants = [];
+
+  afterWindow.forEach(afterPerson => {
+    if (targetRoles.includes(afterPerson.computedStatus)) {
+      // Were they in a target role BEFORE?
+      // Wait, the requirement says "A participant should receive only one window-entry SMS per round, even if ... they move from Backup to Standby ... Standby to Active"
+      // Therefore, the dedupe key is all that matters.
+      // But to be clean, let's also check if they weren't in a target role before OR if round changed.
+      const beforePerson = beforeWindow.find(p => p.name === afterPerson.name);
+
+      let newlyEntered = false;
+      if (!beforePerson) {
+        newlyEntered = true;
+      } else if (afterRound !== currentRound) {
+        newlyEntered = true;
+      } else if (!targetRoles.includes(beforePerson.computedStatus)) {
+        newlyEntered = true;
+      }
+
+      const dedupeKey = `ROUND:${afterRound}|ENTERED_WINDOW|NAME:${afterPerson.name}`;
+
+      // Even if newlyEntered is false, if they somehow lack a notification for this round's entry, send it.
+      // The dedupe key is the ultimate source of truth.
+      if (newlyEntered && !existingKeys.has(dedupeKey)) {
+        newEntrants.push({
+          name: afterPerson.name,
+          role: afterPerson.computedStatus,
+          dedupeKey: dedupeKey,
+          round: afterRound
+        });
+        existingKeys.add(dedupeKey); // prevent dupes in the same batch
+      }
+    }
+  });
+
+  if (newEntrants.length === 0) return [];
+
+  // We need phone numbers
+  const turnHeaders = afterWindowRaw[0];
+  const nameIdx = turnHeaders.indexOf('Name');
+  const phoneIdx = turnHeaders.indexOf('PhoneNumber');
+
+  const createdRowIndices = [];
+
+  // Columns: Timestamp, DedupeKey, ParticipantName, Round, CalculatedRole, Status, TwilioMessageSid, Error
+  const tsIdx = logHeaders.indexOf('Timestamp');
+  const nameLogIdx = logHeaders.indexOf('ParticipantName');
+  const roundIdx = logHeaders.indexOf('Round');
+  const roleIdx = logHeaders.indexOf('CalculatedRole');
+  const statusIdx = logHeaders.indexOf('Status');
+
+  const nextRowIndex = logSheet.getLastRow() + 1;
+  let currentRowOffset = 0;
+
+  newEntrants.forEach(entrant => {
+    let phoneNum = null;
+    if (phoneIdx !== -1 && nameIdx !== -1) {
+      const pRow = afterWindowRaw.find(r => r[nameIdx] === entrant.name);
+      if (pRow) phoneNum = String(pRow[phoneIdx] || '').trim();
+    }
+
+    // Determine initial status based on phone number presence
+    let initialStatus = 'PENDING';
+    if (!phoneNum) {
+      initialStatus = 'SKIPPED_NO_PHONE';
+      console.log(`Skipping SMS for ${entrant.name} - no phone number.`);
+    }
+
+    const rowData = new Array(logHeaders.length).fill('');
+    if (tsIdx !== -1) rowData[tsIdx] = new Date();
+    if (dedupeIdx !== -1) rowData[dedupeIdx] = entrant.dedupeKey;
+    if (nameLogIdx !== -1) rowData[nameLogIdx] = entrant.name;
+    if (roundIdx !== -1) rowData[roundIdx] = entrant.round;
+    if (roleIdx !== -1) rowData[roleIdx] = entrant.role;
+    if (statusIdx !== -1) rowData[statusIdx] = initialStatus;
+
+    logSheet.appendRow(rowData);
+
+    if (initialStatus === 'PENDING') {
+      createdRowIndices.push(nextRowIndex + currentRowOffset);
+    }
+    currentRowOffset++;
+  });
+
+  return createdRowIndices;
+}
+
+/**
+ * Processes PENDING notifications, making external calls to Twilio.
+ * Must run OUTSIDE the script lock.
+ * @param {number[]} rowIndices - Indices in the Notification Log sheet
+ */
+function _processPendingNotifications(rowIndices) {
+  if (!rowIndices || rowIndices.length === 0) return;
+
+  const configCheck = checkSmsConfiguration();
+  const props = _smsDependencies.getProperties();
+  const vacationUrl = props['VACATION_SELECTOR_URL']; // No fallback
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const logSheet = ss.getSheetByName('Notification Log');
+  if (!logSheet) return;
+
+  const logHeaders = logSheet.getRange(1, 1, 1, logSheet.getLastColumn()).getValues()[0];
+  const nameIdx = logHeaders.indexOf('ParticipantName');
+  const roundIdx = logHeaders.indexOf('Round');
+  const roleIdx = logHeaders.indexOf('CalculatedRole');
+  const statusIdx = logHeaders.indexOf('Status');
+  const sidIdx = logHeaders.indexOf('TwilioMessageSid');
+  const errorIdx = logHeaders.indexOf('Error');
+
+  const turnSheet = ss.getSheetByName('Turn Management');
+  const turnData = turnSheet.getDataRange().getValues();
+  const tNameIdx = turnData[0].indexOf('Name');
+  const tPhoneIdx = turnData[0].indexOf('PhoneNumber');
+
+  rowIndices.forEach(rowIdx => {
+    // Re-read row to ensure it's still PENDING
+    const rowRange = logSheet.getRange(rowIdx, 1, 1, logHeaders.length);
+    const rowValues = rowRange.getValues()[0];
+
+    if (rowValues[statusIdx] !== 'PENDING') return;
+
+    // Mark PROCESSING
+    logSheet.getRange(rowIdx, statusIdx + 1).setValue('PROCESSING');
+
+    const pName = rowValues[nameIdx];
+    const pRound = rowValues[roundIdx];
+    const pRole = rowValues[roleIdx];
+
+    // Find phone number
+    let phoneNum = null;
+    if (tNameIdx !== -1 && tPhoneIdx !== -1) {
+      const pRow = turnData.find(r => r[tNameIdx] === pName);
+      if (pRow) phoneNum = String(pRow[tPhoneIdx] || '').trim();
+    }
+
+    if (!phoneNum) {
+      logSheet.getRange(rowIdx, statusIdx + 1).setValue('SKIPPED_NO_PHONE');
+      if (errorIdx !== -1) logSheet.getRange(rowIdx, errorIdx + 1).setValue('No phone number found');
+      return;
+    }
+
+    if (!configCheck.valid) {
+      logSheet.getRange(rowIdx, statusIdx + 1).setValue('FAILED');
+      if (errorIdx !== -1) logSheet.getRange(rowIdx, errorIdx + 1).setValue(configCheck.message);
+      return;
+    }
+
+    // Build and send SMS
+    const msg = `Vacation Week Selection: You are now in the Round ${pRound} selection window as ${pRole}. Make your selection here: ${vacationUrl}`;
+    const result = sendSmsViaTwilio(phoneNum, msg);
+
+    if (result.success) {
+      logSheet.getRange(rowIdx, statusIdx + 1).setValue('SENT');
+      if (sidIdx !== -1) logSheet.getRange(rowIdx, sidIdx + 1).setValue(result.messageSid);
+    } else {
+      logSheet.getRange(rowIdx, statusIdx + 1).setValue('FAILED');
+      if (errorIdx !== -1) logSheet.getRange(rowIdx, errorIdx + 1).setValue(result.error);
+    }
+  });
+}
+
+/**
+ * Admin function to manually notify the current window
+ */
+function sendCurrentWindowNotifications() {
+  if (!isSmsEnabled()) {
+    return "SMS notifications are disabled in configuration.";
+  }
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  let pendingRowIndices = [];
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const configSheet = ss.getSheetByName('Config');
+    const turnSheet = ss.getSheetByName('Turn Management');
+    const currentRound = configSheet.getRange("B2").getValue();
+    const turnDataRaw = turnSheet.getDataRange().getValues();
+
+    // Simulate before window (empty) and after window (current) to trigger notifications for everyone in the window
+    const currentWindow = calculateQueueWindow(turnDataRaw, currentRound);
+
+    pendingRowIndices = computePendingNotifications([], currentWindow, currentRound, currentRound, turnDataRaw);
+  } finally {
+    lock.releaseLock();
+  }
+
+  if (pendingRowIndices && pendingRowIndices.length > 0) {
+    try {
+      _processPendingNotifications(pendingRowIndices);
+      return `Processed ${pendingRowIndices.length} notifications.`;
+    } catch (e) {
+      return "Error processing notifications: " + e.message;
+    }
+  }
+  return "No new notifications to send for the current window.";
+}
+
+/**
+ * Admin function to send a test SMS explicitly bypassing some checks
+ */
+function sendTestSms(name) {
+  const check = checkSmsConfiguration();
+  if (!check.valid) {
+    return "Cannot send test SMS: " + check.message;
+  }
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const turnSheet = ss.getSheetByName('Turn Management');
+  const turnData = turnSheet.getDataRange().getValues();
+  const tNameIdx = turnData[0].indexOf('Name');
+  const tPhoneIdx = turnData[0].indexOf('PhoneNumber');
+
+  if (tNameIdx === -1 || tPhoneIdx === -1) {
+    return "Phone number schema is not setup.";
+  }
+
+  const pRow = turnData.find(r => r[tNameIdx] === name);
+  if (!pRow) return "Participant not found.";
+
+  const phoneNum = String(pRow[tPhoneIdx] || '').trim();
+  if (!phoneNum) return "Participant has no phone number on record.";
+
+  const msg = "TEST MESSAGE: Vacation Week Selection SMS Configuration is working.";
+  const result = sendSmsViaTwilio(phoneNum, msg);
+
+  if (result.success) {
+    return "Test SMS sent successfully. SID: " + result.messageSid;
+  } else {
+    return "Test SMS failed: " + result.error;
+  }
+}
+
+// ============================================================================
+// SMS TESTS
+// ============================================================================
+
+function testSmsConfigurationValidation() {
+  const originalGet = _smsDependencies.getProperties;
+  try {
+    // Missing all
+    _smsDependencies.getProperties = () => ({});
+    if (checkSmsConfiguration().valid) throw new Error("Should fail when missing properties");
+
+    // Has all
+    _smsDependencies.getProperties = () => ({
+      TWILIO_ACCOUNT_SID: '123',
+      TWILIO_AUTH_TOKEN: '456',
+      TWILIO_FROM_NUMBER: '789',
+      VACATION_SELECTOR_URL: 'http://test.com'
+    });
+    if (!checkSmsConfiguration().valid) throw new Error("Should pass with all properties");
+
+    console.log("PASS: testSmsConfigurationValidation");
+  } finally {
+    _smsDependencies.getProperties = originalGet;
+  }
+}
+
+function testSmsEnabledFlag() {
+  const originalGet = _smsDependencies.getProperties;
+  try {
+    _smsDependencies.getProperties = () => ({ SMS_NOTIFICATIONS_ENABLED: 'true' });
+    if (!isSmsEnabled()) throw new Error("Should be enabled");
+
+    _smsDependencies.getProperties = () => ({ SMS_NOTIFICATIONS_ENABLED: 'False' });
+    if (isSmsEnabled()) throw new Error("Should be disabled");
+
+    console.log("PASS: testSmsEnabledFlag");
+  } finally {
+    _smsDependencies.getProperties = originalGet;
+  }
+}
+
+function testComputePendingNotifications() {
+  const originalGet = _smsDependencies.getProperties;
+  let ss;
+  const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
+  try {
+    _smsDependencies.getProperties = () => ({ SMS_NOTIFICATIONS_ENABLED: 'true' });
+
+    ss = SpreadsheetApp.create('Temp Test SS - SMS Notif');
+    SpreadsheetApp.getActiveSpreadsheet = () => ss;
+
+    // Missing Notification Log
+    const indices1 = computePendingNotifications([], [], 1, 1, []);
+    if (indices1.length > 0) throw new Error("Should handle missing log sheet safely");
+
+    ss.insertSheet('Notification Log').appendRow(['Timestamp', 'DedupeKey', 'ParticipantName', 'Round', 'CalculatedRole', 'Status']);
+
+    const beforeWindow = [
+      { name: 'P1', computedStatus: 'Active' },
+      { name: 'P2', computedStatus: 'Standby' }
+    ];
+
+    const afterWindow = [
+      { name: 'P1', computedStatus: 'Completed' },
+      { name: 'P2', computedStatus: 'Active' },
+      { name: 'P3', computedStatus: 'Standby' },
+      { name: 'P4', computedStatus: 'Backup' } // new entrants
+    ];
+
+    const turnHeaders = ['Name', 'PhoneNumber'];
+    const turnDataRaw = [
+      turnHeaders,
+      ['P1', '111'],
+      ['P2', '222'],
+      ['P3', '333'],
+      ['P4', '444'] // newly entered
+    ];
+
+    const indices2 = computePendingNotifications(beforeWindow, afterWindow, 1, 1, turnDataRaw);
+    if (indices2.length !== 2) throw new Error("Expected exactly 2 new notifications (for P3 and P4)");
+
+    // Deduplication check
+    const indices3 = computePendingNotifications(beforeWindow, afterWindow, 1, 1, turnDataRaw);
+    if (indices3.length !== 0) throw new Error("Should not create duplicates in same round");
+
+    console.log("PASS: testComputePendingNotifications");
+  } finally {
+    _smsDependencies.getProperties = originalGet;
+    SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
+    if (ss) {
+      const files = DriveApp.getFilesByName(ss.getName());
+      while (files.hasNext()) files.next().setTrashed(true);
+    }
+  }
+}
+
+function testProcessPendingNotificationsMissingPhone() {
+  const originalGet = _smsDependencies.getProperties;
+  let ss;
+  const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
+  try {
+    _smsDependencies.getProperties = () => ({ SMS_NOTIFICATIONS_ENABLED: 'true', VACATION_SELECTOR_URL: 'http' });
+    ss = SpreadsheetApp.create('Temp Test SS - Process SMS');
+    SpreadsheetApp.getActiveSpreadsheet = () => ss;
+
+    const logSheet = ss.insertSheet('Notification Log');
+    logSheet.appendRow(['Timestamp', 'DedupeKey', 'ParticipantName', 'Round', 'CalculatedRole', 'Status', 'TwilioMessageSid', 'Error']);
+    logSheet.appendRow(['', 'k1', 'NoPhonePerson', 1, 'Active', 'PENDING', '', '']);
+
+    const turnSheet = ss.insertSheet('Turn Management');
+    turnSheet.appendRow(['Name', 'PhoneNumber']);
+    turnSheet.appendRow(['NoPhonePerson', '']); // blank phone
+
+    _processPendingNotifications([2]); // row index 2
+
+    const status = logSheet.getRange(2, 6).getValue();
+    if (status !== 'SKIPPED_NO_PHONE') throw new Error("Should skip if no phone number");
+
+    console.log("PASS: testProcessPendingNotificationsMissingPhone");
+  } finally {
+    _smsDependencies.getProperties = originalGet;
+    SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
+    if (ss) {
+      const files = DriveApp.getFilesByName(ss.getName());
+      while (files.hasNext()) files.next().setTrashed(true);
+    }
+  }
+}
+
+function runSmsTests() {
+  testSmsConfigurationValidation();
+  testSmsEnabledFlag();
+  testComputePendingNotifications();
+  testProcessPendingNotificationsMissingPhone();
+  testProcessSelectionSmsIntegration();
+  testProcessPendingNotificationsMissingConfig();
+}
+
+function testProcessSelectionSmsIntegration() {
+  const originalGet = _smsDependencies.getProperties;
+  let ss;
+  const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
+  try {
+    // Enable SMS
+    _smsDependencies.getProperties = () => ({ SMS_NOTIFICATIONS_ENABLED: 'true', VACATION_SELECTOR_URL: 'http' });
+
+    ss = setupMockSpreadsheet();
+    SpreadsheetApp.getActiveSpreadsheet = () => ss;
+
+    // Setup Notification Log & PhoneNumber schema
+    setupSpreadsheetSchema();
+    const turnSheet = ss.getSheetByName('Turn Management');
+    const logSheet = ss.getSheetByName('Notification Log');
+
+    // Set Phone numbers for test
+    const turnData = turnSheet.getDataRange().getValues();
+    const headers = turnData[0];
+    const phoneIdx = headers.indexOf('PhoneNumber');
+    for (let i = 1; i <= 5; i++) {
+        turnSheet.getRange(i + 1, phoneIdx + 1).setValue('555-1234');
+    }
+
+    // Simulate Person 1 selection (moving window)
+    const weekTime = ss.getSheetByName('Week Availability').getRange(2, 1).getValue().getTime();
+    const res = processSelection({ name: 'Person1', week1: weekTime });
+
+    if (!res.success) throw new Error("Selection should be successful");
+
+    const logData = logSheet.getDataRange().getValues();
+    const logHeaders = logData[0];
+
+    // When Person 1 completes, the window moves to 2, 3, 4.
+    // Person 4 should be the new entrant (Backup).
+    const nameLogIdx = logHeaders.indexOf('ParticipantName');
+
+    const newEntrantsLogs = logData.slice(1).filter(r => r[nameLogIdx] === 'Person4');
+    if (newEntrantsLogs.length !== 1) throw new Error("Expected exactly one notification log for the new entrant (Person 4)");
+
+    // Ensure failure to log doesn't fail processSelection
+    // Sabotage computePendingNotifications by renaming the sheet so it throws or fails gracefully
+    logSheet.setName('HiddenLog');
+
+    const weekTime2 = ss.getSheetByName('Week Availability').getRange(3, 1).getValue().getTime();
+    const res2 = processSelection({ name: 'Person2', week1: weekTime2 });
+
+    if (!res2.success) throw new Error("Selection should be successful even if SMS/logging fails");
+
+    console.log("PASS: testProcessSelectionSmsIntegration");
+  } finally {
+    _smsDependencies.getProperties = originalGet;
+    SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
+    if (ss) {
+      const files = DriveApp.getFilesByName(ss.getName());
+      while (files.hasNext()) files.next().setTrashed(true);
+    }
+  }
+}
+
+function testProcessPendingNotificationsMissingConfig() {
+  const originalGet = _smsDependencies.getProperties;
+  const originalFetch = _smsDependencies.fetch;
+  let ss;
+  const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
+  let fetchCalled = false;
+
+  try {
+    // Missing VACATION_SELECTOR_URL
+    _smsDependencies.getProperties = () => ({
+      SMS_NOTIFICATIONS_ENABLED: 'true',
+      TWILIO_ACCOUNT_SID: '123',
+      TWILIO_AUTH_TOKEN: '456',
+      TWILIO_FROM_NUMBER: '789'
+    });
+
+    _smsDependencies.fetch = () => {
+       fetchCalled = true;
+       return { getResponseCode: () => 200, getContentText: () => '{}' };
+    };
+
+    ss = SpreadsheetApp.create('Temp Test SS - Config Missing');
+    SpreadsheetApp.getActiveSpreadsheet = () => ss;
+
+    const logSheet = ss.insertSheet('Notification Log');
+    logSheet.appendRow(['Timestamp', 'DedupeKey', 'ParticipantName', 'Round', 'CalculatedRole', 'Status', 'TwilioMessageSid', 'Error']);
+    logSheet.appendRow(['', 'k1', 'PersonWithPhone', 1, 'Active', 'PENDING', '', '']);
+
+    const turnSheet = ss.insertSheet('Turn Management');
+    turnSheet.appendRow(['Name', 'PhoneNumber']);
+    turnSheet.appendRow(['PersonWithPhone', '555-1234']);
+
+    _processPendingNotifications([2]); // row index 2
+
+    const status = logSheet.getRange(2, 6).getValue();
+    const errorMsg = logSheet.getRange(2, 8).getValue();
+
+    if (fetchCalled) throw new Error("Should not call Twilio fetch if config is invalid");
+    if (status !== 'FAILED') throw new Error("Status should be FAILED");
+    if (String(errorMsg).indexOf('Missing SMS configuration') === -1) throw new Error("Should log configuration error");
+
+    console.log("PASS: testProcessPendingNotificationsMissingConfig");
+  } finally {
+    _smsDependencies.getProperties = originalGet;
+    _smsDependencies.fetch = originalFetch;
+    SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
+    if (ss) {
+      const files = DriveApp.getFilesByName(ss.getName());
+      while (files.hasNext()) files.next().setTrashed(true);
+    }
+  }
 }
