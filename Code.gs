@@ -709,18 +709,22 @@ function processSelection(selectionData) {
 }
 
 function _processSelectionCore(selectionData) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const turnSheet = ss.getSheetByName('Turn Management');
-  const weekSheet = ss.getSheetByName('Week Availability');
-  const configSheet = ss.getSheetByName('Config');
   // Inner lock removed, managed by wrapper
   try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const turnSheet = ss.getSheetByName('Turn Management');
+    const weekSheet = ss.getSheetByName('Week Availability');
+    const configSheet = ss.getSheetByName('Config');
+
+    // Capture before state outside of the inner closure
+    const beforeRound = configSheet.getRange("B2").getValue();
+    const beforeWindowRaw = turnSheet.getDataRange().getValues();
+    const beforeWindow = calculateQueueWindow(beforeWindowRaw, beforeRound);
+
     let coreResult = null;
     const executeLogic = () => {
     const turnDataRaw = turnSheet.getDataRange().getValues();
-    const currentRound = configSheet.getRange("B2").getValue();
-    const beforeWindowRaw = turnSheet.getDataRange().getValues();
-    const beforeWindow = calculateQueueWindow(beforeWindowRaw, currentRound);
+    const currentRound = beforeRound;
 
     // Schema validation
     const schemaCheck = validateSchema(turnDataRaw, currentRound);
@@ -926,7 +930,13 @@ function _processSelectionCore(selectionData) {
     const afterWindowRaw = turnSheet.getDataRange().getValues();
     const afterWindow = calculateQueueWindow(afterWindowRaw, afterRound);
 
-    const createdRowIndices = computePendingNotifications(beforeWindow, afterWindow, afterRound, currentRound, afterWindowRaw);
+    let createdRowIndices = [];
+    try {
+      createdRowIndices = computePendingNotifications(beforeWindow, afterWindow, afterRound, beforeRound, afterWindowRaw);
+    } catch (err) {
+      console.error("Failed to compute pending notifications: " + err.message);
+      createdRowIndices = [];
+    }
     return { coreResult, createdRowIndices };
   } catch (e) {
     return { coreResult: { success: false, message: "An error occurred: " + e.message } };
@@ -1467,7 +1477,7 @@ function computePendingNotifications(beforeWindow, afterWindow, afterRound, curr
 
       // Even if newlyEntered is false, if they somehow lack a notification for this round's entry, send it.
       // The dedupe key is the ultimate source of truth.
-      if (!existingKeys.has(dedupeKey)) {
+      if (newlyEntered && !existingKeys.has(dedupeKey)) {
         newEntrants.push({
           name: afterPerson.name,
           role: afterPerson.computedStatus,
@@ -1806,4 +1816,65 @@ function runSmsTests() {
   testSmsEnabledFlag();
   testComputePendingNotifications();
   testProcessPendingNotificationsMissingPhone();
+  testProcessSelectionSmsIntegration();
+}
+
+function testProcessSelectionSmsIntegration() {
+  const originalGet = _smsDependencies.getProperties;
+  let ss;
+  const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
+  try {
+    // Enable SMS
+    _smsDependencies.getProperties = () => ({ SMS_NOTIFICATIONS_ENABLED: 'true', VACATION_SELECTOR_URL: 'http' });
+
+    ss = setupMockSpreadsheet();
+    SpreadsheetApp.getActiveSpreadsheet = () => ss;
+
+    // Setup Notification Log & PhoneNumber schema
+    setupSpreadsheetSchema();
+    const turnSheet = ss.getSheetByName('Turn Management');
+    const logSheet = ss.getSheetByName('Notification Log');
+
+    // Set Phone numbers for test
+    const turnData = turnSheet.getDataRange().getValues();
+    const headers = turnData[0];
+    const phoneIdx = headers.indexOf('PhoneNumber');
+    for (let i = 1; i <= 5; i++) {
+        turnSheet.getRange(i + 1, phoneIdx + 1).setValue('555-1234');
+    }
+
+    // Simulate Person 1 selection (moving window)
+    const weekTime = ss.getSheetByName('Week Availability').getRange(2, 1).getValue().getTime();
+    const res = processSelection({ name: 'Person1', week1: weekTime });
+
+    if (!res.success) throw new Error("Selection should be successful");
+
+    const logData = logSheet.getDataRange().getValues();
+    const logHeaders = logData[0];
+
+    // When Person 1 completes, the window moves to 2, 3, 4.
+    // Person 4 should be the new entrant (Backup).
+    const nameLogIdx = logHeaders.indexOf('ParticipantName');
+
+    const newEntrantsLogs = logData.slice(1).filter(r => r[nameLogIdx] === 'Person4');
+    if (newEntrantsLogs.length !== 1) throw new Error("Expected exactly one notification log for the new entrant (Person 4)");
+
+    // Ensure failure to log doesn't fail processSelection
+    // Sabotage computePendingNotifications by renaming the sheet so it throws or fails gracefully
+    logSheet.setName('HiddenLog');
+
+    const weekTime2 = ss.getSheetByName('Week Availability').getRange(3, 1).getValue().getTime();
+    const res2 = processSelection({ name: 'Person2', week1: weekTime2 });
+
+    if (!res2.success) throw new Error("Selection should be successful even if SMS/logging fails");
+
+    console.log("PASS: testProcessSelectionSmsIntegration");
+  } finally {
+    _smsDependencies.getProperties = originalGet;
+    SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
+    if (ss) {
+      const files = DriveApp.getFilesByName(ss.getName());
+      while (files.hasNext()) files.next().setTrashed(true);
+    }
+  }
 }
