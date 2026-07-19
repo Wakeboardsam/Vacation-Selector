@@ -1591,15 +1591,15 @@ function _processPendingNotifications(rowIndices) {
       if (pRow) phoneNum = String(pRow[tPhoneIdx] || '').trim();
     }
 
-    if (!configCheck.valid) {
-      logSheet.getRange(rowIdx, statusIdx + 1).setValue('FAILED');
-      if (errorIdx !== -1) logSheet.getRange(rowIdx, errorIdx + 1).setValue(configCheck.message);
-      return;
-    }
-
     if (!phoneNum) {
       logSheet.getRange(rowIdx, statusIdx + 1).setValue('SKIPPED_NO_PHONE');
       if (errorIdx !== -1) logSheet.getRange(rowIdx, errorIdx + 1).setValue('No phone number found');
+      return;
+    }
+
+    if (!configCheck.valid) {
+      logSheet.getRange(rowIdx, statusIdx + 1).setValue('FAILED');
+      if (errorIdx !== -1) logSheet.getRange(rowIdx, errorIdx + 1).setValue(configCheck.message);
       return;
     }
 
