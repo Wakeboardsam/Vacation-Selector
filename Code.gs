@@ -1226,15 +1226,17 @@ function setupMockSpreadsheet() {
     turnSheet.appendRow(['Person5', '1234', 5, 'Waiting', 0, 5, false]);
 
     const weekSheet = ss.insertSheet('Week Availability');
-    weekSheet.appendRow(['StartDate', 'Classification', 'P1', 'P2', 'P3', 'P4', 'SpotsRemaining']);
+    weekSheet.appendRow(['WeekStartDate', 'Classification', 'Person1', 'Person2', 'Person3', 'Person4', 'SpotsRemaining']);
     weekSheet.appendRow([new Date('2026-06-01'), 'Prime', '', '', '', '', 4]);
     weekSheet.appendRow([new Date('2026-10-05'), 'Non-Prime', '', '', '', '', 4]);
     weekSheet.appendRow([new Date('2026-11-02'), 'Non-Prime', '', '', '', '', 4]);
-    weekSheet.appendRow([new Date('2026-12-07'), 'UnknownType', '', '', '', '', 4]);
+    weekSheet.appendRow([new Date('2026-12-07'), 'Non-Prime', '', '', '', '', 4]); // Valid classification for preflight tests
 
     const configSheet = ss.insertSheet('Config');
     configSheet.getRange('A2').setValue('CurrentRound');
     configSheet.getRange('B2').setValue(1);
+    configSheet.getRange('A3').setValue('SelectionStarted');
+    configSheet.getRange('B3').setValue(false);
 
     // Delete the default 'Sheet1'
     const sheet1 = ss.getSheetByName('Sheet1');
@@ -1281,6 +1283,7 @@ function runIntegrationTests() {
             console.log("PASS: Person 4 accepted in new window.");
 
             // TEST 6: Invalid Classification Request Rejected
+            ss.getSheetByName('Week Availability').getRange(5, 2).setValue('UnknownType');
             let invalidTime = ss.getSheetByName('Week Availability').getRange(5, 1).getValue().getTime();
             res = processSelection({ name: 'Person3', week1: invalidTime });
             if (res.success) throw new Error("Person 3 selecting invalid classification should fail.");
@@ -2056,29 +2059,24 @@ function adminControlOnEdit(e) {
         return;
       }
 
-      // Check if already running
+      // Check if already running using SelectionStarted config
       const ss = SpreadsheetApp.getActiveSpreadsheet();
       const configSheet = ss.getSheetByName('Config');
-      const currentRound = configSheet.getRange('B2').getValue();
       const turnSheet = ss.getSheetByName('Turn Management');
       const turnData = turnSheet.getDataRange().getValues();
-      const headers = turnData[0];
-      const statusIdx = headers.indexOf('Status');
-      const weeksIdx = headers.indexOf('WeeksSelected');
 
-      let alreadyRunning = false;
-      if (currentRound > 1) {
-        alreadyRunning = true;
-      } else {
-        for (let i = 1; i < turnData.length; i++) {
-          if (turnData[i][statusIdx] !== 'Waiting' || (weeksIdx !== -1 && Number(turnData[i][weeksIdx]) > 0)) {
-            alreadyRunning = true;
-            break;
-          }
+      let selectionStarted = false;
+      const configData = configSheet.getDataRange().getValues();
+      let startedRowIdx = -1;
+      for (let i = 0; i < configData.length; i++) {
+        if (configData[i][0] === 'SelectionStarted') {
+          selectionStarted = (configData[i][1] === true || String(configData[i][1]).toUpperCase() === 'TRUE');
+          startedRowIdx = i + 1;
+          break;
         }
       }
 
-      if (alreadyRunning) {
+      if (selectionStarted) {
         sheet.getRange('B15').setValue('❌ NOT STARTED');
         sheet.getRange('B16').setValue(new Date().toLocaleString());
         sheet.getRange('B17').setValue('The selection process has already begun.');
@@ -2088,6 +2086,12 @@ function adminControlOnEdit(e) {
 
       // Start Round 1
       configSheet.getRange('B2').setValue(1);
+
+      if (startedRowIdx !== -1) {
+        configSheet.getRange(startedRowIdx, 2).setValue(true);
+      } else {
+        configSheet.appendRow(['SelectionStarted', true]);
+      }
 
       // Calculate queue to get initial notifications
       const beforeWindow = []; // Empty since we just started
@@ -2179,7 +2183,7 @@ function runPreflightChecks() {
   if (weekData.length < 2) return { valid: false, message: 'No weeks defined in Week Availability.' };
 
   const wHeaders = weekData[0];
-  if (wHeaders[0] !== 'StartDate' || wHeaders[1] !== 'Classification' || wHeaders[6] !== 'SpotsRemaining') {
+  if (wHeaders[0] !== 'WeekStartDate' || wHeaders[1] !== 'Classification' || wHeaders[6] !== 'SpotsRemaining') {
     return { valid: false, message: 'Week Availability headers are incorrect.' };
   }
 
@@ -2294,9 +2298,9 @@ function testAdminControlAlreadyRunning() {
     SpreadsheetApp.getActiveSpreadsheet = () => ss;
     setupSpreadsheetSchema(); // Need skipNextTurn etc
 
-    // Make it look running
-    const turnSheet = ss.getSheetByName('Turn Management');
-    turnSheet.getRange(2, turnSheet.getLastColumn() - 1).setValue(1); // Set WeeksSelected > 0 for someone
+    // Make it look running using persistent state
+    const configSheet = ss.getSheetByName('Config');
+    configSheet.getRange('B3').setValue(true);
 
     setupAdminControl();
     const adminSheet = ss.getSheetByName('Admin Control');
@@ -2407,6 +2411,7 @@ function runAdminTests() {
   testAdminControlMissingLottery();
   testAdminControlRepeatedTaps();
   testAutomaticRound2FailedSafely();
+  testAutomaticRound2SmsTransition();
 }
 
 function testAdminControlMissingLottery() {
@@ -2539,6 +2544,100 @@ function testAutomaticRound2FailedSafely() {
     } else {
       props.deleteProperty('SMS_NOTIFICATIONS_ENABLED');
     }
+    SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
+    if (ss) {
+      const files = DriveApp.getFilesByName(ss.getName());
+      while (files.hasNext()) files.next().setTrashed(true);
+    }
+  }
+}
+
+
+function testAutomaticRound2SmsTransition() {
+  let ss;
+  const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
+  const props = _smsDependencies.getProperties;
+  const originalFetch = _smsDependencies.fetch;
+
+  try {
+    // Enable SMS, and mock config for successful validation
+    _smsDependencies.getProperties = () => ({
+      SMS_NOTIFICATIONS_ENABLED: 'true',
+      TWILIO_ACCOUNT_SID: '123',
+      TWILIO_AUTH_TOKEN: '456',
+      TWILIO_FROM_NUMBER: '789',
+      VACATION_SELECTOR_URL: 'http'
+    });
+
+    // Mock the external network call to succeed and not throw
+    _smsDependencies.fetch = () => {
+      return {
+        getResponseCode: () => 200,
+        getContentText: () => JSON.stringify({ sid: 'SM123' })
+      };
+    };
+
+    ss = setupMockSpreadsheet();
+    SpreadsheetApp.getActiveSpreadsheet = () => ss;
+    setupSpreadsheetSchema(); // Need skipNextTurn, Notifications sheet, etc.
+
+    const configSheet = ss.getSheetByName('Config');
+    const turnSheet = ss.getSheetByName('Turn Management');
+    const weekSheet = ss.getSheetByName('Week Availability');
+    const logSheet = ss.getSheetByName('Notification Log');
+
+    // Set Phone numbers for test
+    const turnData = turnSheet.getDataRange().getValues();
+    const phoneIdx = turnData[0].indexOf('PhoneNumber');
+    for (let i = 1; i <= 5; i++) {
+        turnSheet.getRange(i + 1, phoneIdx + 1).setValue('555-1234');
+    }
+
+    // Everyone except Person5 is Complete for Round 1
+    for (let i = 2; i <= 5; i++) {
+        turnSheet.getRange(i, 4).setValue('Completed'); // Status
+    }
+
+    // Wipe any existing logs (from other tests modifying mock sheet)
+    if (logSheet.getLastRow() > 1) {
+      logSheet.getRange(2, 1, logSheet.getLastRow() - 1, logSheet.getLastColumn()).clearContent();
+    }
+
+    // Simulate Person5 finishing Round 1
+    const res = processSelection({ name: 'Person5', week1: weekSheet.getRange(2, 1).getValue().getTime() });
+
+    if (!res.success) throw new Error("Selection should have succeeded: " + res.message);
+
+    const currentRound = configSheet.getRange('B2').getValue();
+    if (currentRound !== 2) throw new Error("Should have automatically transitioned to Round 2.");
+
+    // Verify Notification Log row generation
+    // Since Round 2 sorts by lottery position, people 1, 2, and 3 should be in the window
+    // and thus exactly 3 logs should exist.
+    const newLogs = logSheet.getDataRange().getValues();
+    // length is 4 (header + 3 logs)
+    if (newLogs.length !== 4) throw new Error("Expected exactly 3 notifications, got " + (newLogs.length - 1));
+
+    const roundIdx = newLogs[0].indexOf('Round');
+    const dedupeIdx = newLogs[0].indexOf('DedupeKey');
+    const statusIdx = newLogs[0].indexOf('Status');
+
+    for (let i = 1; i < newLogs.length; i++) {
+      if (newLogs[i][roundIdx] !== 2) throw new Error("Log has wrong round number: " + newLogs[i][roundIdx]);
+      if (newLogs[i][dedupeIdx].indexOf('ROUND:2') === -1) throw new Error("Log has wrong dedupe key: " + newLogs[i][dedupeIdx]);
+      if (newLogs[i][statusIdx] !== 'SENT') throw new Error("Log status is not SENT: " + newLogs[i][statusIdx]);
+    }
+
+    // Verify no duplicates created when evaluating round again
+    const windowRaw = turnSheet.getDataRange().getValues();
+    const window = calculateQueueWindow(windowRaw, 2);
+    const newIndices = computePendingNotifications([], window, 2, 2, windowRaw);
+    if (newIndices.length !== 0) throw new Error("Duplicate notifications were queued!");
+
+    console.log("PASS: testAutomaticRound2SmsTransition");
+  } finally {
+    _smsDependencies.getProperties = props;
+    _smsDependencies.fetch = originalFetch;
     SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
     if (ss) {
       const files = DriveApp.getFilesByName(ss.getName());
