@@ -51,6 +51,7 @@ const THEME_ROLE_LABELS = {
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
   ui.createMenu('Vacation Admin')
+    .addItem('Set Up Admin Control', 'setupAdminControl')
     .addItem('Set Up Theme Colors', 'setupThemeColorsSheet')
     .addItem('Refresh Theme Swatches', 'refreshThemeColorSwatches')
     .addToUi();
@@ -647,40 +648,9 @@ function initializeLotteryRound() {
         return "Not in Round 1. No action taken.";
     }
 
-    let turnData = turnSheet.getDataRange().getValues();
-    const headers = turnData[0];
-    const statusIdx = headers.indexOf('Status');
-    const lotPosIdx = headers.indexOf('LotteryPosition');
-
-    let isRound1Over = true;
-    for (let i=1; i<turnData.length; i++) {
-        if (turnData[i][statusIdx] !== 'Completed') {
-            isRound1Over = false;
-            break;
-        }
-    }
-
-    if (!isRound1Over) {
-        return "Round 1 is not fully complete. No action taken.";
-    }
-
-    if (!checkLotteryReady(turnData)) {
-        return "LotteryPosition is not correctly populated. Must have exactly one unique value per participant.";
-    }
-
-    // Advance to Round 2
-    configSheet.getRange("B2").setValue(2);
-
-    // Reset all to Waiting and setup Active window
-    let eligibleUsers = [];
-    for (let i=1; i<turnData.length; i++) {
-        turnSheet.getRange(i+1, statusIdx+1).setValue('Waiting');
-        eligibleUsers.push({ data: turnData[i], originalIndex: i+1 });
-    }
-
-    // Status is calculated dynamically now, we only need to reset Completed to Waiting
-
-    return "Lottery Round 2 Initialized Successfully.";
+    const turnDataRaw = turnSheet.getDataRange().getValues();
+    const result = _transitionToRound2(turnSheet, configSheet, turnDataRaw);
+    return result.message;
 }
 
 
@@ -885,7 +855,15 @@ function _processSelectionCore(selectionData) {
         if (anchorIndex === -1) {
              // Round is over
              if (nextRound === 1) {
-                 return { success: true, message: "Selection recorded. Round 1 complete — awaiting lottery setup." };
+                 // Try to automatically transition to Round 2
+                 const transitionResult = _transitionToRound2(turnSheet, configSheet, turnSheet.getDataRange().getValues());
+                 if (!transitionResult.success) {
+                     // Transition failed, stay in Round 1, but selection was successful
+                     return { success: true, message: "Selection recorded. Round 1 complete. Could not auto-start Round 2: " + transitionResult.message };
+                 }
+                 // Transition succeeded, move to Round 2 processing
+                 nextRound++;
+                 continue;
              } else {
                  nextRound++;
                  configSheet.getRange("B2").setValue(nextRound);
@@ -1119,6 +1097,7 @@ function runTests() {
   testDashboardDataExtraction();
   runThemeColorTests();
   runSmsTests();
+  runAdminTests();
 }
 
 function testRound1SelectableWeeks() {
@@ -1932,6 +1911,634 @@ function testProcessPendingNotificationsMissingConfig() {
   } finally {
     _smsDependencies.getProperties = originalGet;
     _smsDependencies.fetch = originalFetch;
+    SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
+    if (ss) {
+      const files = DriveApp.getFilesByName(ss.getName());
+      while (files.hasNext()) files.next().setTrashed(true);
+    }
+  }
+}
+function setupAdminControl() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName('Admin Control');
+
+  if (!sheet) {
+    sheet = ss.insertSheet('Admin Control');
+  } else {
+    sheet.clear();
+  }
+
+  // Set column widths
+  sheet.setColumnWidth(1, 200);
+  sheet.setColumnWidth(2, 250);
+
+  // A1:B1 - VACATION ADMIN CONTROL
+  sheet.getRange('A1:B1').merge().setValue('VACATION ADMIN CONTROL')
+    .setFontWeight('bold').setFontSize(14).setHorizontalAlignment('center');
+
+  // A2:B2 - Short instruction
+  sheet.getRange('A2:B2').merge().setValue('Complete the checklist, then check Start Round 1.')
+    .setFontStyle('italic').setHorizontalAlignment('center').setWrap(true);
+
+  // A4:B4 - PRE-START CHECKLIST
+  sheet.getRange('A4:B4').merge().setValue('PRE-START CHECKLIST')
+    .setFontWeight('bold').setBackground('#f3f4f6');
+
+  // A5:B9 - Checkboxes and labels
+  sheet.getRange('A5:A9').insertCheckboxes();
+  sheet.getRange('B5').setValue('Roster reviewed');
+  sheet.getRange('B6').setValue('Seniority order reviewed');
+  sheet.getRange('B7').setValue('Lottery order reviewed');
+  sheet.getRange('B8').setValue('Week calendar Dates reviewed');
+  sheet.getRange('B9').setValue('Phone numbers and PINs reviewed');
+
+  // A11:B11 - START SELECTION
+  sheet.getRange('A11:B11').merge().setValue('START SELECTION')
+    .setFontWeight('bold').setBackground('#f3f4f6');
+
+  // A12:B12 - Action checkbox
+  sheet.getRange('A12').insertCheckboxes();
+  sheet.getRange('B12').setValue('START ROUND 1').setFontWeight('bold');
+
+  // A14:B14 - LAST ACTION RESULT
+  sheet.getRange('A14:B14').merge().setValue('LAST ACTION RESULT')
+    .setFontWeight('bold').setBackground('#f3f4f6');
+
+  // A15:B17 - Status, Timestamp, Details
+  sheet.getRange('A15').setValue('Status:');
+  sheet.getRange('A16').setValue('Timestamp:');
+  sheet.getRange('A17').setValue('Details:');
+
+  sheet.getRange('B15').setValue('NOT STARTED');
+  sheet.getRange('B16').setValue('-');
+  sheet.getRange('B17').setValue('-');
+  sheet.getRange('B15:B17').setWrap(true);
+
+  // Increase row heights for mobile readability
+  for (let r = 1; r <= 17; r++) {
+    sheet.setRowHeight(r, 40);
+  }
+
+  // Install trigger
+  installAdminControlTrigger();
+
+  return "Admin Control tab created and trigger installed successfully.";
+}
+
+function installAdminControlTrigger() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const triggers = ScriptApp.getUserTriggers(ss);
+
+  let triggerExists = false;
+  for (let i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === 'adminControlOnEdit') {
+      triggerExists = true;
+      break;
+    }
+  }
+
+  if (!triggerExists) {
+    ScriptApp.newTrigger('adminControlOnEdit')
+      .forSpreadsheet(ss)
+      .onEdit()
+      .create();
+  }
+}
+
+function adminControlOnEdit(e) {
+  if (!e || !e.range) return;
+  const range = e.range;
+  const sheet = range.getSheet();
+
+  if (sheet.getName() !== 'Admin Control') return;
+
+  // Check if edited cell is A12 (Start Round 1 checkbox)
+  if (range.getRow() === 12 && range.getColumn() === 1) {
+    const isChecked = range.getValue() === true;
+    if (!isChecked) return; // Only process when checked
+
+    // We should lock here
+    const lock = LockService.getScriptLock();
+    // Wait for up to 30 seconds
+    const locked = lock.tryLock(30000);
+    if (!locked) {
+      sheet.getRange('B15').setValue('❌ ERROR');
+      sheet.getRange('B16').setValue(new Date().toLocaleString());
+      sheet.getRange('B17').setValue('Could not acquire system lock. Please try again.');
+      range.setValue(false); // Reset
+      return;
+    }
+
+    let pendingRowIndices = [];
+
+    try {
+      // Re-read A12 to ensure it wasn't double tapped
+      if (range.getValue() !== true) return;
+
+      // Verify A5:A9 are true
+      const checklistValues = sheet.getRange('A5:A9').getValues();
+      const allChecked = checklistValues.every(row => row[0] === true);
+      if (!allChecked) {
+        sheet.getRange('B15').setValue('❌ NOT STARTED');
+        sheet.getRange('B16').setValue(new Date().toLocaleString());
+        sheet.getRange('B17').setValue('All pre-start checklist items must be confirmed.');
+        range.setValue(false);
+        return;
+      }
+
+      // Run preflight checks
+      const preflight = runPreflightChecks();
+      if (!preflight.valid) {
+        sheet.getRange('B15').setValue('❌ NOT STARTED');
+        sheet.getRange('B16').setValue(new Date().toLocaleString());
+        sheet.getRange('B17').setValue(preflight.message);
+        range.setValue(false);
+        return;
+      }
+
+      // Check if already running
+      const ss = SpreadsheetApp.getActiveSpreadsheet();
+      const configSheet = ss.getSheetByName('Config');
+      const currentRound = configSheet.getRange('B2').getValue();
+      const turnSheet = ss.getSheetByName('Turn Management');
+      const turnData = turnSheet.getDataRange().getValues();
+      const headers = turnData[0];
+      const statusIdx = headers.indexOf('Status');
+      const weeksIdx = headers.indexOf('WeeksSelected');
+
+      let alreadyRunning = false;
+      if (currentRound > 1) {
+        alreadyRunning = true;
+      } else {
+        for (let i = 1; i < turnData.length; i++) {
+          if (turnData[i][statusIdx] !== 'Waiting' || (weeksIdx !== -1 && Number(turnData[i][weeksIdx]) > 0)) {
+            alreadyRunning = true;
+            break;
+          }
+        }
+      }
+
+      if (alreadyRunning) {
+        sheet.getRange('B15').setValue('❌ NOT STARTED');
+        sheet.getRange('B16').setValue(new Date().toLocaleString());
+        sheet.getRange('B17').setValue('The selection process has already begun.');
+        range.setValue(false);
+        return;
+      }
+
+      // Start Round 1
+      configSheet.getRange('B2').setValue(1);
+
+      // Calculate queue to get initial notifications
+      const beforeWindow = []; // Empty since we just started
+      const currentWindow = calculateQueueWindow(turnData, 1);
+
+      pendingRowIndices = computePendingNotifications(beforeWindow, currentWindow, 1, 1, turnData);
+
+      sheet.getRange('B15').setValue('✅ READY — ROUND 1 STARTED');
+      sheet.getRange('B16').setValue(new Date().toLocaleString());
+      sheet.getRange('B17').setValue(`${turnData.length - 1} participants validated. Initial notifications queued.`);
+
+      range.setValue(false); // Reset checkbox
+
+    } catch(err) {
+      sheet.getRange('B15').setValue('❌ ERROR');
+      sheet.getRange('B16').setValue(new Date().toLocaleString());
+      sheet.getRange('B17').setValue(err.message);
+      range.setValue(false);
+    } finally {
+      lock.releaseLock();
+    }
+
+    // Process SMS outside the lock
+    if (pendingRowIndices && pendingRowIndices.length > 0) {
+      try {
+        _processPendingNotifications(pendingRowIndices);
+      } catch (e) {
+        console.error("SMS notification processing failed during Round 1 start: " + e.message);
+      }
+    }
+  }
+}
+
+function runPreflightChecks() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const turnSheet = ss.getSheetByName('Turn Management');
+  const weekSheet = ss.getSheetByName('Week Availability');
+  const configSheet = ss.getSheetByName('Config');
+
+  if (!turnSheet) return { valid: false, message: 'Turn Management sheet is missing.' };
+  if (!weekSheet) return { valid: false, message: 'Week Availability sheet is missing.' };
+  if (!configSheet) return { valid: false, message: 'Config sheet is missing.' };
+
+  const turnData = turnSheet.getDataRange().getValues();
+  if (turnData.length < 2) return { valid: false, message: 'Turn Management has no participants.' };
+
+  const headers = turnData[0];
+
+  // Required columns
+  const required = ['Name', 'PIN', 'SeniorityPosition', 'Status', 'WeeksSelected', 'LotteryPosition', 'SkipNextTurn'];
+  for (let req of required) {
+    if (headers.indexOf(req) === -1) {
+      return { valid: false, message: `Missing required column in Turn Management: ${req}` };
+    }
+  }
+
+  const nameIdx = headers.indexOf('Name');
+  const pinIdx = headers.indexOf('PIN');
+  const senIdx = headers.indexOf('SeniorityPosition');
+  const lotIdx = headers.indexOf('LotteryPosition');
+
+  const names = new Set();
+  const senPositions = new Set();
+  const lotPositions = new Set();
+
+  for (let i = 1; i < turnData.length; i++) {
+    const row = turnData[i];
+    const name = String(row[nameIdx] || '').trim();
+    if (!name) return { valid: false, message: `Row ${i+1} has a blank name.` };
+    if (names.has(name)) return { valid: false, message: `Duplicate name found: ${name}` };
+    names.add(name);
+
+    const pin = String(row[pinIdx] || '').trim();
+    if (!pin) return { valid: false, message: `Participant ${name} is missing a PIN.` };
+
+    const sen = row[senIdx];
+    if (sen === '' || sen === null || sen === undefined) return { valid: false, message: `SeniorityPosition is blank for ${name}.` };
+    if (senPositions.has(sen)) return { valid: false, message: `SeniorityPosition ${sen} is duplicated.` };
+    senPositions.add(sen);
+
+    const lot = row[lotIdx];
+    if (lot === '' || lot === null || lot === undefined) return { valid: false, message: `LotteryPosition is blank for ${name}.` };
+    if (lotPositions.has(lot)) return { valid: false, message: `LotteryPosition ${lot} is duplicated.` };
+    lotPositions.add(lot);
+  }
+
+  // Week Availability Checks
+  const weekData = weekSheet.getDataRange().getValues();
+  if (weekData.length < 2) return { valid: false, message: 'No weeks defined in Week Availability.' };
+
+  const wHeaders = weekData[0];
+  if (wHeaders[0] !== 'StartDate' || wHeaders[1] !== 'Classification' || wHeaders[6] !== 'SpotsRemaining') {
+    return { valid: false, message: 'Week Availability headers are incorrect.' };
+  }
+
+  for (let i = 1; i < weekData.length; i++) {
+    const row = weekData[i];
+    const date = row[0];
+    if (!date) return { valid: false, message: `Row ${i+1} in Week Availability is missing a Date.` };
+
+    const cls = normalizeClassification(row[1]);
+    if (!cls) return { valid: false, message: `Row ${i+1} has an invalid classification.` };
+
+    const spots = row[6];
+    if (spots === '' || spots === null || isNaN(spots) || spots < 0 || spots > 4) {
+      return { valid: false, message: `Row ${i+1} has an invalid SpotsRemaining value.` };
+    }
+  }
+
+  // Conditional SMS validation
+  if (isSmsEnabled()) {
+    const smsCheck = checkSmsConfiguration();
+    if (!smsCheck.valid) return smsCheck;
+
+    const phoneIdx = headers.indexOf('PhoneNumber');
+    if (phoneIdx === -1) return { valid: false, message: 'PhoneNumber column is missing but SMS is enabled.' };
+
+    for (let i = 1; i < turnData.length; i++) {
+      const phone = String(turnData[i][phoneIdx] || '').trim();
+      if (!phone) return { valid: false, message: `Participant ${turnData[i][nameIdx]} is missing a phone number, but SMS is enabled.` };
+    }
+  }
+
+  return { valid: true };
+}
+
+/**
+ * Shared helper to safely transition the system from Round 1 to Round 2.
+ * Validates that all participants have finished Round 1 and have unique lottery positions.
+ * @returns {object} { success: boolean, message: string }
+ */
+function _transitionToRound2(turnSheet, configSheet, turnDataRaw) {
+  const headers = turnDataRaw[0];
+  const statusIdx = headers.indexOf('Status');
+  const lotPosIdx = headers.indexOf('LotteryPosition');
+
+  if (statusIdx === -1) return { success: false, message: "Status column missing." };
+
+  // Verify everyone is completed
+  let isRound1Over = true;
+  for (let i = 1; i < turnDataRaw.length; i++) {
+    if (turnDataRaw[i][statusIdx] !== 'Completed') {
+      isRound1Over = false;
+      break;
+    }
+  }
+
+  if (!isRound1Over) {
+    return { success: false, message: "Round 1 is not fully complete. No action taken." };
+  }
+
+  // Verify lottery readiness
+  if (!checkLotteryReady(turnDataRaw)) {
+    return { success: false, message: "LotteryPosition is not correctly populated. Must have exactly one unique value per participant." };
+  }
+
+  // Validation passed, perform state transitions
+  configSheet.getRange("B2").setValue(2);
+
+  for (let i = 1; i < turnDataRaw.length; i++) {
+    turnSheet.getRange(i + 1, statusIdx + 1).setValue('Waiting');
+  }
+
+  return { success: true, message: "Lottery Round 2 Initialized Successfully." };
+}
+
+function testAdminControlMissingCheckboxes() {
+  let ss;
+  const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
+  try {
+    ss = setupMockSpreadsheet();
+    SpreadsheetApp.getActiveSpreadsheet = () => ss;
+
+    // Create Admin Control
+    setupAdminControl();
+
+    const adminSheet = ss.getSheetByName('Admin Control');
+
+    // Uncheck one requirement
+    adminSheet.getRange('A5').setValue(false);
+
+    // Trigger start
+    adminSheet.getRange('A12').setValue(true);
+    adminControlOnEdit({ range: adminSheet.getRange('A12') });
+
+    const status = adminSheet.getRange('B15').getValue();
+    if (status !== '❌ NOT STARTED') throw new Error("Should not start if checklist is incomplete.");
+
+    console.log("PASS: testAdminControlMissingCheckboxes");
+  } finally {
+    SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
+    if (ss) {
+      const files = DriveApp.getFilesByName(ss.getName());
+      while (files.hasNext()) files.next().setTrashed(true);
+    }
+  }
+}
+
+function testAdminControlAlreadyRunning() {
+  let ss;
+  const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
+  try {
+    ss = setupMockSpreadsheet();
+    SpreadsheetApp.getActiveSpreadsheet = () => ss;
+    setupSpreadsheetSchema(); // Need skipNextTurn etc
+
+    // Make it look running
+    const turnSheet = ss.getSheetByName('Turn Management');
+    turnSheet.getRange(2, turnSheet.getLastColumn() - 1).setValue(1); // Set WeeksSelected > 0 for someone
+
+    setupAdminControl();
+    const adminSheet = ss.getSheetByName('Admin Control');
+    adminSheet.getRange('A5:A9').setValue(true); // Check all
+    adminSheet.getRange('A12').setValue(true); // Trigger
+
+    adminControlOnEdit({ range: adminSheet.getRange('A12') });
+
+    const status = adminSheet.getRange('B15').getValue();
+    if (status !== '❌ NOT STARTED') throw new Error("Should not start if already running.");
+    if (adminSheet.getRange('B17').getValue().indexOf('already begun') === -1) throw new Error("Wrong error message for already running.");
+
+    console.log("PASS: testAdminControlAlreadyRunning");
+  } finally {
+    SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
+    if (ss) {
+      const files = DriveApp.getFilesByName(ss.getName());
+      while (files.hasNext()) files.next().setTrashed(true);
+    }
+  }
+}
+
+function testAdminControlSuccessfulStart() {
+  let ss;
+  const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
+  try {
+    ss = setupMockSpreadsheet();
+    SpreadsheetApp.getActiveSpreadsheet = () => ss;
+    setupSpreadsheetSchema(); // Need skipNextTurn etc
+
+    // Turn off SMS to not fail on missing phone numbers
+    const props = PropertiesService.getScriptProperties();
+    props.setProperty('SMS_NOTIFICATIONS_ENABLED', 'false');
+
+    setupAdminControl();
+    const adminSheet = ss.getSheetByName('Admin Control');
+    adminSheet.getRange('A5:A9').setValue(true); // Check all
+    adminSheet.getRange('A12').setValue(true); // Trigger
+
+    adminControlOnEdit({ range: adminSheet.getRange('A12') });
+
+    const status = adminSheet.getRange('B15').getValue();
+    if (status !== '✅ READY — ROUND 1 STARTED') throw new Error("Failed to start Round 1. Status: " + status);
+    if (adminSheet.getRange('A12').getValue() === true) throw new Error("Checkbox should be reset");
+
+    console.log("PASS: testAdminControlSuccessfulStart");
+  } finally {
+    SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
+    if (ss) {
+      const files = DriveApp.getFilesByName(ss.getName());
+      while (files.hasNext()) files.next().setTrashed(true);
+    }
+  }
+}
+
+function testAutomaticRound2Transition() {
+  let ss;
+  const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
+  const props = PropertiesService.getScriptProperties();
+  const originalSms = props.getProperty('SMS_NOTIFICATIONS_ENABLED');
+  try {
+    props.setProperty('SMS_NOTIFICATIONS_ENABLED', 'false'); // Disable SMS
+
+    ss = setupMockSpreadsheet();
+    SpreadsheetApp.getActiveSpreadsheet = () => ss;
+    setupSpreadsheetSchema(); // Get all columns
+
+    const configSheet = ss.getSheetByName('Config');
+    const turnSheet = ss.getSheetByName('Turn Management');
+    const weekSheet = ss.getSheetByName('Week Availability');
+
+    // Everyone except Person5 is Complete
+    for (let i = 2; i <= 5; i++) {
+        turnSheet.getRange(i, 4).setValue('Completed'); // Status
+    }
+
+    // Simulate Person5 finishing
+    const res = processSelection({ name: 'Person5', week1: weekSheet.getRange(2, 1).getValue().getTime() });
+
+    if (!res.success) throw new Error("Selection should have succeeded: " + res.message);
+
+    const currentRound = configSheet.getRange('B2').getValue();
+    if (currentRound !== 2) throw new Error("Should have automatically transitioned to Round 2. Instead in round " + currentRound);
+
+    const p1Status = turnSheet.getRange(2, 4).getValue();
+    if (p1Status !== 'Waiting') throw new Error("Statuses should be reset to Waiting.");
+
+    console.log("PASS: testAutomaticRound2Transition");
+  } finally {
+    if (originalSms) {
+      props.setProperty('SMS_NOTIFICATIONS_ENABLED', originalSms);
+    } else {
+      props.deleteProperty('SMS_NOTIFICATIONS_ENABLED');
+    }
+    SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
+    if (ss) {
+      const files = DriveApp.getFilesByName(ss.getName());
+      while (files.hasNext()) files.next().setTrashed(true);
+    }
+  }
+}
+
+function runAdminTests() {
+  testAdminControlMissingCheckboxes();
+  testAdminControlAlreadyRunning();
+  testAdminControlSuccessfulStart();
+  testAutomaticRound2Transition();
+  testAdminControlMissingLottery();
+  testAdminControlRepeatedTaps();
+  testAutomaticRound2FailedSafely();
+}
+
+function testAdminControlMissingLottery() {
+  let ss;
+  const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
+  try {
+    ss = setupMockSpreadsheet();
+    SpreadsheetApp.getActiveSpreadsheet = () => ss;
+    setupSpreadsheetSchema(); // Need skipNextTurn etc
+
+    // Mess up lottery position
+    const turnSheet = ss.getSheetByName('Turn Management');
+    turnSheet.getRange(2, 6).setValue(''); // Blank LotteryPosition for Person1
+
+    // Turn off SMS to not fail on missing phone numbers
+    const props = PropertiesService.getScriptProperties();
+    props.setProperty('SMS_NOTIFICATIONS_ENABLED', 'false');
+
+    setupAdminControl();
+    const adminSheet = ss.getSheetByName('Admin Control');
+    adminSheet.getRange('A5:A9').setValue(true); // Check all
+    adminSheet.getRange('A12').setValue(true); // Trigger
+
+    adminControlOnEdit({ range: adminSheet.getRange('A12') });
+
+    const status = adminSheet.getRange('B15').getValue();
+    const details = adminSheet.getRange('B17').getValue();
+
+    if (status !== '❌ NOT STARTED') throw new Error("Should not start with missing lottery position.");
+    if (details.indexOf('LotteryPosition is blank') === -1) throw new Error("Missing correct error message. Got: " + details);
+
+    // Fix it, then make it duplicate
+    turnSheet.getRange(2, 6).setValue(2);
+    adminSheet.getRange('A12').setValue(true);
+    adminControlOnEdit({ range: adminSheet.getRange('A12') });
+
+    const statusDup = adminSheet.getRange('B15').getValue();
+    const detailsDup = adminSheet.getRange('B17').getValue();
+
+    if (statusDup !== '❌ NOT STARTED') throw new Error("Should not start with duplicate lottery position.");
+    if (detailsDup.indexOf('is duplicated') === -1) throw new Error("Missing correct error message for duplicate. Got: " + detailsDup);
+
+    console.log("PASS: testAdminControlMissingLottery");
+  } finally {
+    SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
+    if (ss) {
+      const files = DriveApp.getFilesByName(ss.getName());
+      while (files.hasNext()) files.next().setTrashed(true);
+    }
+  }
+}
+
+function testAdminControlRepeatedTaps() {
+  let ss;
+  const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
+  try {
+    ss = setupMockSpreadsheet();
+    SpreadsheetApp.getActiveSpreadsheet = () => ss;
+    setupSpreadsheetSchema(); // Need skipNextTurn etc
+
+    // Turn off SMS to not fail on missing phone numbers
+    const props = PropertiesService.getScriptProperties();
+    props.setProperty('SMS_NOTIFICATIONS_ENABLED', 'false');
+
+    setupAdminControl();
+    const adminSheet = ss.getSheetByName('Admin Control');
+    adminSheet.getRange('A5:A9').setValue(true); // Check all
+    adminSheet.getRange('A12').setValue(true); // Trigger
+
+    // First tap starts it
+    adminControlOnEdit({ range: adminSheet.getRange('A12') });
+
+    const status = adminSheet.getRange('B15').getValue();
+    if (status !== '✅ READY — ROUND 1 STARTED') throw new Error("Failed to start Round 1 initially");
+
+    // Next tap should not reset anything
+    adminSheet.getRange('A12').setValue(true);
+    adminControlOnEdit({ range: adminSheet.getRange('A12') });
+
+    const status2 = adminSheet.getRange('B15').getValue();
+    if (status2 !== '❌ NOT STARTED') throw new Error("Repeated tap should be blocked as 'NOT STARTED'. Status: " + status2);
+
+    console.log("PASS: testAdminControlRepeatedTaps");
+  } finally {
+    SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
+    if (ss) {
+      const files = DriveApp.getFilesByName(ss.getName());
+      while (files.hasNext()) files.next().setTrashed(true);
+    }
+  }
+}
+
+function testAutomaticRound2FailedSafely() {
+  let ss;
+  const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
+  const props = PropertiesService.getScriptProperties();
+  const originalSms = props.getProperty('SMS_NOTIFICATIONS_ENABLED');
+  try {
+    props.setProperty('SMS_NOTIFICATIONS_ENABLED', 'false'); // Disable SMS
+
+    ss = setupMockSpreadsheet();
+    SpreadsheetApp.getActiveSpreadsheet = () => ss;
+    setupSpreadsheetSchema(); // Get all columns
+
+    const configSheet = ss.getSheetByName('Config');
+    const turnSheet = ss.getSheetByName('Turn Management');
+    const weekSheet = ss.getSheetByName('Week Availability');
+
+    // Make LotteryPosition duplicated to fail transition validation
+    turnSheet.getRange(2, 6).setValue(2);
+
+    // Everyone except Person5 is Complete
+    for (let i = 2; i <= 5; i++) {
+        turnSheet.getRange(i, 4).setValue('Completed'); // Status
+    }
+
+    // Simulate Person5 finishing
+    const res = processSelection({ name: 'Person5', week1: weekSheet.getRange(2, 1).getValue().getTime() });
+
+    if (!res.success) throw new Error("Selection should have succeeded even if transition failed: " + res.message);
+    if (res.message.indexOf('Could not auto-start') === -1) throw new Error("Should notify that auto-start failed.");
+
+    const currentRound = configSheet.getRange('B2').getValue();
+    if (currentRound !== 1) throw new Error("Should have stayed in round 1 because of validation failure. Currently in round: " + currentRound);
+
+    console.log("PASS: testAutomaticRound2FailedSafely");
+  } finally {
+    if (originalSms) {
+      props.setProperty('SMS_NOTIFICATIONS_ENABLED', originalSms);
+    } else {
+      props.deleteProperty('SMS_NOTIFICATIONS_ENABLED');
+    }
     SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
     if (ss) {
       const files = DriveApp.getFilesByName(ss.getName());
