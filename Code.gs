@@ -693,8 +693,13 @@ function _processSelectionCore(selectionData) {
 
     let coreResult = null;
     const executeLogic = () => {
-    const turnDataRaw = turnSheet.getDataRange().getValues();
+    let turnDataRaw = turnSheet.getDataRange().getValues();
     const currentRound = beforeRound;
+
+    // Check if selection is started
+    if (!isSelectionStarted()) {
+        return { success: false, message: "The vacation selection process has not started yet." };
+    }
 
     // Schema validation
     const schemaCheck = validateSchema(turnDataRaw, currentRound);
@@ -863,6 +868,7 @@ function _processSelectionCore(selectionData) {
                  }
                  // Transition succeeded, move to Round 2 processing
                  nextRound++;
+                 turnDataRaw = turnSheet.getDataRange().getValues(); // Refresh stale memory data
                  continue;
              } else {
                  nextRound++;
@@ -872,6 +878,7 @@ function _processSelectionCore(selectionData) {
                  rows.forEach((row, index) => {
                      turnSheet.getRange(index + 2, statusIdx + 1).setValue('Waiting');
                  });
+                 turnDataRaw = turnSheet.getDataRange().getValues(); // Refresh stale memory data
                  continue; // re-evaluate for the new round
              }
         }
@@ -1256,6 +1263,9 @@ function runIntegrationTests() {
         SpreadsheetApp.getActiveSpreadsheet = () => ss;
 
         try {
+            // Turn on SelectionStarted for general integration tests
+            ss.getSheetByName('Config').getRange('B3').setValue(true);
+
             // TEST 1: Person 4 rejected initially
             let res = processSelection({ name: 'Person4', week1: ss.getSheetByName('Week Availability').getRange(2, 1).getValue().getTime() });
             if (res.success) throw new Error("Person 4 should have been rejected (outside window).");
@@ -1921,7 +1931,7 @@ function testProcessPendingNotificationsMissingConfig() {
     }
   }
 }
-function setupAdminControl() {
+function setupAdminControl(skipTrigger = false) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   let sheet = ss.getSheetByName('Admin Control');
 
@@ -1932,8 +1942,8 @@ function setupAdminControl() {
   }
 
   // Set column widths
-  sheet.setColumnWidth(1, 200);
-  sheet.setColumnWidth(2, 250);
+  sheet.setColumnWidth(1, 60);
+  sheet.setColumnWidth(2, 300);
 
   // A1:B1 - VACATION ADMIN CONTROL
   sheet.getRange('A1:B1').merge().setValue('VACATION ADMIN CONTROL')
@@ -1983,9 +1993,11 @@ function setupAdminControl() {
   }
 
   // Install trigger
-  installAdminControlTrigger();
+  if (!skipTrigger) {
+    installAdminControlTrigger();
+  }
 
-  return "Admin Control tab created and trigger installed successfully.";
+  return "Admin Control tab created successfully.";
 }
 
 function installAdminControlTrigger() {
@@ -2266,7 +2278,7 @@ function testAdminControlMissingCheckboxes() {
     SpreadsheetApp.getActiveSpreadsheet = () => ss;
 
     // Create Admin Control
-    setupAdminControl();
+    setupAdminControl(true);
 
     const adminSheet = ss.getSheetByName('Admin Control');
 
@@ -2302,7 +2314,7 @@ function testAdminControlAlreadyRunning() {
     const configSheet = ss.getSheetByName('Config');
     configSheet.getRange('B3').setValue(true);
 
-    setupAdminControl();
+    setupAdminControl(true);
     const adminSheet = ss.getSheetByName('Admin Control');
     adminSheet.getRange('A5:A9').setValue(true); // Check all
     adminSheet.getRange('A12').setValue(true); // Trigger
@@ -2335,7 +2347,7 @@ function testAdminControlSuccessfulStart() {
     const props = PropertiesService.getScriptProperties();
     props.setProperty('SMS_NOTIFICATIONS_ENABLED', 'false');
 
-    setupAdminControl();
+    setupAdminControl(true);
     const adminSheet = ss.getSheetByName('Admin Control');
     adminSheet.getRange('A5:A9').setValue(true); // Check all
     adminSheet.getRange('A12').setValue(true); // Trigger
@@ -2371,6 +2383,9 @@ function testAutomaticRound2Transition() {
     const configSheet = ss.getSheetByName('Config');
     const turnSheet = ss.getSheetByName('Turn Management');
     const weekSheet = ss.getSheetByName('Week Availability');
+
+    // Enable started state for transition tests
+    configSheet.getRange('B3').setValue(true);
 
     // Everyone except Person5 is Complete
     for (let i = 2; i <= 5; i++) {
@@ -2412,6 +2427,7 @@ function runAdminTests() {
   testAdminControlRepeatedTaps();
   testAutomaticRound2FailedSafely();
   testAutomaticRound2SmsTransition();
+  testSelectionStartedEnforcement();
 }
 
 function testAdminControlMissingLottery() {
@@ -2430,7 +2446,7 @@ function testAdminControlMissingLottery() {
     const props = PropertiesService.getScriptProperties();
     props.setProperty('SMS_NOTIFICATIONS_ENABLED', 'false');
 
-    setupAdminControl();
+    setupAdminControl(true);
     const adminSheet = ss.getSheetByName('Admin Control');
     adminSheet.getRange('A5:A9').setValue(true); // Check all
     adminSheet.getRange('A12').setValue(true); // Trigger
@@ -2476,7 +2492,7 @@ function testAdminControlRepeatedTaps() {
     const props = PropertiesService.getScriptProperties();
     props.setProperty('SMS_NOTIFICATIONS_ENABLED', 'false');
 
-    setupAdminControl();
+    setupAdminControl(true);
     const adminSheet = ss.getSheetByName('Admin Control');
     adminSheet.getRange('A5:A9').setValue(true); // Check all
     adminSheet.getRange('A12').setValue(true); // Trigger
@@ -2593,6 +2609,9 @@ function testAutomaticRound2SmsTransition() {
         turnSheet.getRange(i + 1, phoneIdx + 1).setValue('555-1234');
     }
 
+    // Enable started state for transition tests
+    configSheet.getRange('B3').setValue(true);
+
     // Everyone except Person5 is Complete for Round 1
     for (let i = 2; i <= 5; i++) {
         turnSheet.getRange(i, 4).setValue('Completed'); // Status
@@ -2638,6 +2657,60 @@ function testAutomaticRound2SmsTransition() {
   } finally {
     _smsDependencies.getProperties = props;
     _smsDependencies.fetch = originalFetch;
+    SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
+    if (ss) {
+      const files = DriveApp.getFilesByName(ss.getName());
+      while (files.hasNext()) files.next().setTrashed(true);
+    }
+  }
+}
+
+
+/**
+ * Shared helper to check if the selection process has formally started
+ */
+function isSelectionStarted() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const configSheet = ss.getSheetByName('Config');
+  if (!configSheet) return false;
+
+  const configData = configSheet.getDataRange().getValues();
+  for (let i = 0; i < configData.length; i++) {
+    if (configData[i][0] === 'SelectionStarted') {
+      return (configData[i][1] === true || String(configData[i][1]).toUpperCase() === 'TRUE');
+    }
+  }
+  return false;
+}
+
+function testSelectionStartedEnforcement() {
+  let ss;
+  const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
+  try {
+    ss = setupMockSpreadsheet();
+    SpreadsheetApp.getActiveSpreadsheet = () => ss;
+
+    // Explicitly set SelectionStarted to FALSE
+    const configSheet = ss.getSheetByName('Config');
+    configSheet.getRange('B3').setValue(false);
+
+    const weekSheet = ss.getSheetByName('Week Availability');
+    const weekTime = weekSheet.getRange(2, 1).getValue().getTime();
+
+    // Test 1: Should fail
+    let res = processSelection({ name: 'Person1', week1: weekTime });
+    if (res.success) throw new Error("Selection should have failed when SelectionStarted = FALSE.");
+    if (res.message.indexOf("not started yet") === -1) throw new Error("Wrong error message: " + res.message);
+
+    // Set SelectionStarted to TRUE
+    configSheet.getRange('B3').setValue(true);
+
+    // Test 2: Should succeed
+    res = processSelection({ name: 'Person1', week1: weekTime });
+    if (!res.success) throw new Error("Selection should have succeeded when SelectionStarted = TRUE. " + res.message);
+
+    console.log("PASS: testSelectionStartedEnforcement");
+  } finally {
     SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
     if (ss) {
       const files = DriveApp.getFilesByName(ss.getName());
