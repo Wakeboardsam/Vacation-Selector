@@ -2536,6 +2536,9 @@ function testAutomaticRound2FailedSafely() {
     const turnSheet = ss.getSheetByName('Turn Management');
     const weekSheet = ss.getSheetByName('Week Availability');
 
+    // Enable started state for transition tests
+    configSheet.getRange('B3').setValue(true);
+
     // Make LotteryPosition duplicated to fail transition validation
     turnSheet.getRange(2, 6).setValue(2);
 
