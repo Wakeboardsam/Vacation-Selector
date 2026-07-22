@@ -2273,7 +2273,10 @@ function _transitionToRound2(turnSheet, configSheet, turnDataRaw) {
 function testAdminControlMissingCheckboxes() {
   let ss;
   const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
+  const props = PropertiesService.getScriptProperties();
+  const originalSms = props.getProperty('SMS_NOTIFICATIONS_ENABLED');
   try {
+    props.setProperty('SMS_NOTIFICATIONS_ENABLED', 'false'); // Disable SMS
     ss = setupMockSpreadsheet();
     SpreadsheetApp.getActiveSpreadsheet = () => ss;
 
@@ -2294,6 +2297,11 @@ function testAdminControlMissingCheckboxes() {
 
     console.log("PASS: testAdminControlMissingCheckboxes");
   } finally {
+    if (originalSms !== null) {
+      props.setProperty('SMS_NOTIFICATIONS_ENABLED', originalSms);
+    } else {
+      props.deleteProperty('SMS_NOTIFICATIONS_ENABLED');
+    }
     SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
     if (ss) {
       const files = DriveApp.getFilesByName(ss.getName());
@@ -2305,7 +2313,10 @@ function testAdminControlMissingCheckboxes() {
 function testAdminControlAlreadyRunning() {
   let ss;
   const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
+  const props = PropertiesService.getScriptProperties();
+  const originalSms = props.getProperty('SMS_NOTIFICATIONS_ENABLED');
   try {
+    props.setProperty('SMS_NOTIFICATIONS_ENABLED', 'false'); // Disable SMS
     ss = setupMockSpreadsheet();
     SpreadsheetApp.getActiveSpreadsheet = () => ss;
     setupSpreadsheetSchema(); // Need skipNextTurn etc
@@ -2327,6 +2338,11 @@ function testAdminControlAlreadyRunning() {
 
     console.log("PASS: testAdminControlAlreadyRunning");
   } finally {
+    if (originalSms !== null) {
+      props.setProperty('SMS_NOTIFICATIONS_ENABLED', originalSms);
+    } else {
+      props.deleteProperty('SMS_NOTIFICATIONS_ENABLED');
+    }
     SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
     if (ss) {
       const files = DriveApp.getFilesByName(ss.getName());
@@ -2338,14 +2354,13 @@ function testAdminControlAlreadyRunning() {
 function testAdminControlSuccessfulStart() {
   let ss;
   const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
+  const props = PropertiesService.getScriptProperties();
+  const originalSms = props.getProperty('SMS_NOTIFICATIONS_ENABLED');
   try {
+    props.setProperty('SMS_NOTIFICATIONS_ENABLED', 'false'); // Disable SMS
     ss = setupMockSpreadsheet();
     SpreadsheetApp.getActiveSpreadsheet = () => ss;
     setupSpreadsheetSchema(); // Need skipNextTurn etc
-
-    // Turn off SMS to not fail on missing phone numbers
-    const props = PropertiesService.getScriptProperties();
-    props.setProperty('SMS_NOTIFICATIONS_ENABLED', 'false');
 
     setupAdminControl(true);
     const adminSheet = ss.getSheetByName('Admin Control');
@@ -2360,6 +2375,11 @@ function testAdminControlSuccessfulStart() {
 
     console.log("PASS: testAdminControlSuccessfulStart");
   } finally {
+    if (originalSms !== null) {
+      props.setProperty('SMS_NOTIFICATIONS_ENABLED', originalSms);
+    } else {
+      props.deleteProperty('SMS_NOTIFICATIONS_ENABLED');
+    }
     SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
     if (ss) {
       const files = DriveApp.getFilesByName(ss.getName());
@@ -2433,7 +2453,10 @@ function runAdminTests() {
 function testAdminControlMissingLottery() {
   let ss;
   const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
+  const props = PropertiesService.getScriptProperties();
+  const originalSms = props.getProperty('SMS_NOTIFICATIONS_ENABLED');
   try {
+    props.setProperty('SMS_NOTIFICATIONS_ENABLED', 'false'); // Disable SMS
     ss = setupMockSpreadsheet();
     SpreadsheetApp.getActiveSpreadsheet = () => ss;
     setupSpreadsheetSchema(); // Need skipNextTurn etc
@@ -2441,10 +2464,6 @@ function testAdminControlMissingLottery() {
     // Mess up lottery position
     const turnSheet = ss.getSheetByName('Turn Management');
     turnSheet.getRange(2, 6).setValue(''); // Blank LotteryPosition for Person1
-
-    // Turn off SMS to not fail on missing phone numbers
-    const props = PropertiesService.getScriptProperties();
-    props.setProperty('SMS_NOTIFICATIONS_ENABLED', 'false');
 
     setupAdminControl(true);
     const adminSheet = ss.getSheetByName('Admin Control');
@@ -2472,6 +2491,11 @@ function testAdminControlMissingLottery() {
 
     console.log("PASS: testAdminControlMissingLottery");
   } finally {
+    if (originalSms !== null) {
+      props.setProperty('SMS_NOTIFICATIONS_ENABLED', originalSms);
+    } else {
+      props.deleteProperty('SMS_NOTIFICATIONS_ENABLED');
+    }
     SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
     if (ss) {
       const files = DriveApp.getFilesByName(ss.getName());
@@ -2483,14 +2507,13 @@ function testAdminControlMissingLottery() {
 function testAdminControlRepeatedTaps() {
   let ss;
   const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
+  const props = PropertiesService.getScriptProperties();
+  const originalSms = props.getProperty('SMS_NOTIFICATIONS_ENABLED');
   try {
+    props.setProperty('SMS_NOTIFICATIONS_ENABLED', 'false'); // Disable SMS
     ss = setupMockSpreadsheet();
     SpreadsheetApp.getActiveSpreadsheet = () => ss;
     setupSpreadsheetSchema(); // Need skipNextTurn etc
-
-    // Turn off SMS to not fail on missing phone numbers
-    const props = PropertiesService.getScriptProperties();
-    props.setProperty('SMS_NOTIFICATIONS_ENABLED', 'false');
 
     setupAdminControl(true);
     const adminSheet = ss.getSheetByName('Admin Control');
@@ -2512,6 +2535,11 @@ function testAdminControlRepeatedTaps() {
 
     console.log("PASS: testAdminControlRepeatedTaps");
   } finally {
+    if (originalSms !== null) {
+      props.setProperty('SMS_NOTIFICATIONS_ENABLED', originalSms);
+    } else {
+      props.deleteProperty('SMS_NOTIFICATIONS_ENABLED');
+    }
     SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
     if (ss) {
       const files = DriveApp.getFilesByName(ss.getName());
