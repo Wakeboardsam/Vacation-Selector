@@ -857,7 +857,34 @@ function _processTransferOffer(selectionData, ss, turnSheet, participantSheet) {
     if (offers && offers.length > 0) {
         const transferSheet = ss.getSheetByName('Transfer Offers');
         const nextId = transferSheet.getLastRow();
-        const rowsToWrite = offers.map((o, i) => ['OFFER-' + (nextId + i), name, o.type, o.dateEpoch, o.details, 'Open', '']);
+        const rowsToWrite = [];
+
+        const wSheet = ss.getSheetByName('Weekend Coverage');
+        const wData = wSheet ? wSheet.getDataRange().getValues() : [];
+        const hSheet = ss.getSheetByName('Holiday Coverage');
+        const hData = hSheet ? hSheet.getDataRange().getValues() : [];
+
+        for (let i = 0; i < offers.length; i++) {
+            let o = offers[i];
+            let isValid = false;
+            if (o.type === 'Weekend') {
+                let day = o.details.indexOf('Saturday') !== -1 ? 'Saturday' : 'Sunday';
+                for (let k = 1; k < wData.length; k++) {
+                    if (new Date(wData[k][0]).getTime() === o.dateEpoch && wData[k][1] === day && wData[k][3] === name) {
+                        isValid = true; break;
+                    }
+                }
+            } else if (o.type === 'Holiday') {
+                for (let k = 1; k < hData.length; k++) {
+                    if (new Date(hData[k][1]).getTime() === o.dateEpoch && hData[k][2] === o.details && hData[k][3] === name) {
+                        isValid = true; break;
+                    }
+                }
+            }
+            if (!isValid) return { success: false, message: "You do not own one or more of the offered assignments: " + o.details };
+            rowsToWrite.push(['OFFER-' + (nextId + i), name, o.type, o.dateEpoch, o.details, 'Open', '']);
+        }
+
         transferSheet.getRange(transferSheet.getLastRow() + 1, 1, rowsToWrite.length, 7).setValues(rowsToWrite);
     }
     let userRowIdx = turnSheet.getDataRange().getValues().findIndex(row => row[0] === name) + 1;
@@ -897,7 +924,36 @@ function _processTransferSelection(selectionData, ss, turnSheet, participantShee
     if (targetRowIdx === -1) return { success: false, message: "Offer not found." };
     if (offer[5] !== 'Open') return { success: false, message: "That offer was just accepted by another participant." };
 
-    const type = offer[2], dateEpoch = Number(offer[3]), details = offer[4];
+    const type = offer[2], dateEpoch = Number(offer[3]), details = offer[4], giver = offer[1];
+
+    // Verify giver still owns it before moving
+    if (type === 'Weekend') {
+        const wSheet = ss.getSheetByName('Weekend Coverage');
+        const wData = wSheet.getDataRange().getValues();
+        let day = details.indexOf('Saturday') !== -1 ? 'Saturday' : 'Sunday';
+        let verifyTargetIdx = -1;
+        for (let i = 1; i < wData.length; i++) {
+            if (new Date(wData[i][0]).getTime() === dateEpoch && wData[i][1] === day) {
+                if (wData[i][3] !== giver) return { success: false, message: "The original giver no longer holds this assignment." };
+                verifyTargetIdx = i;
+                break;
+            }
+        }
+        if (verifyTargetIdx === -1) return { success: false, message: "Assignment no longer exists." };
+    } else if (type === 'Holiday') {
+        const hSheet = ss.getSheetByName('Holiday Coverage');
+        const hData = hSheet.getDataRange().getValues();
+        let verifyTargetIdx = -1;
+        for (let i = 1; i < hData.length; i++) {
+            if (new Date(hData[i][1]).getTime() === dateEpoch && hData[i][2] === details) {
+                if (hData[i][3] !== giver) return { success: false, message: "The original giver no longer holds this assignment." };
+                verifyTargetIdx = i;
+                break;
+            }
+        }
+        if (verifyTargetIdx === -1) return { success: false, message: "Assignment no longer exists." };
+    }
+
     if (type === 'Weekend') {
         const wSheet = ss.getSheetByName('Weekend Coverage');
         const wData = wSheet.getDataRange().getValues();
@@ -1872,122 +1928,143 @@ function sendSmsViaTwilio(to, body) {
  * Must be called under the script lock.
  * @returns {number[]} Array of row indices created in the Notification Log
  */
-function computePendingNotifications(beforeWindow, afterWindow, afterRound, currentRound, afterWindowRaw) {
-  if (!isSmsEnabled()) return [];
 
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const logSheet = ss.getSheetByName('Notification Log');
-  if (!logSheet) return []; // Schema not set up yet
-
-  const logData = logSheet.getDataRange().getValues();
-  const logHeaders = logData[0] || [];
-  const dedupeIdx = logHeaders.indexOf('DedupeKey');
-
-  // If no dedupe col, we can't safely notify
-  if (dedupeIdx === -1) return [];
-
-  // Get existing dedupe keys to prevent duplicates
-  const existingKeys = new Set();
-  for (let i = 1; i < logData.length; i++) {
-    if (logData[i][dedupeIdx]) {
-      existingKeys.add(String(logData[i][dedupeIdx]));
-    }
-  }
-
-  // Find participants who are in the Active, Standby, or Backup roles NOW
-  const targetRoles = ['Active', 'Standby', 'Backup'];
-  const newEntrants = [];
-
-  afterWindow.forEach(afterPerson => {
-    if (targetRoles.includes(afterPerson.computedStatus)) {
-      // Were they in a target role BEFORE?
-      // Wait, the requirement says "A participant should receive only one window-entry SMS per round, even if ... they move from Backup to Standby ... Standby to Active"
-      // Therefore, the dedupe key is all that matters.
-      // But to be clean, let's also check if they weren't in a target role before OR if round changed.
-      const beforePerson = beforeWindow.find(p => p.name === afterPerson.name);
-
-      let newlyEntered = false;
-      if (!beforePerson) {
-        newlyEntered = true;
-      } else if (afterRound !== currentRound) {
-        newlyEntered = true;
-      } else if (!targetRoles.includes(beforePerson.computedStatus)) {
-        newlyEntered = true;
-      }
-
-      const dedupeKey = `ROUND:${afterRound}|ENTERED_WINDOW|NAME:${afterPerson.name}`;
-
-      // Even if newlyEntered is false, if they somehow lack a notification for this round's entry, send it.
-      // The dedupe key is the ultimate source of truth.
-      if (newlyEntered && !existingKeys.has(dedupeKey)) {
-        newEntrants.push({
-          name: afterPerson.name,
-          role: afterPerson.computedStatus,
-          dedupeKey: dedupeKey,
-          round: afterRound
-        });
-        existingKeys.add(dedupeKey); // prevent dupes in the same batch
-      }
-    }
-  });
-
-  if (newEntrants.length === 0) return [];
-
-  // We need phone numbers
-  const turnHeaders = afterWindowRaw[0];
-  const nameIdx = turnHeaders.indexOf('Name');
-  const phoneIdx = turnHeaders.indexOf('PhoneNumber');
-
-  const createdRowIndices = [];
-
-  // Columns: Timestamp, DedupeKey, ParticipantName, Round, CalculatedRole, Status, TwilioMessageSid, Error
-  const tsIdx = logHeaders.indexOf('Timestamp');
-  const nameLogIdx = logHeaders.indexOf('ParticipantName');
-  const roundIdx = logHeaders.indexOf('Round');
-  const roleIdx = logHeaders.indexOf('CalculatedRole');
-  const statusIdx = logHeaders.indexOf('Status');
-
-  const nextRowIndex = logSheet.getLastRow() + 1;
-  let currentRowOffset = 0;
-
-  newEntrants.forEach(entrant => {
-    let phoneNum = null;
-    if (phoneIdx !== -1 && nameIdx !== -1) {
-      const pRow = afterWindowRaw.find(r => r[nameIdx] === entrant.name);
-      if (pRow) phoneNum = String(pRow[phoneIdx] || '').trim();
+function _buildDedupeKey(participantName, turnActivationId = '') {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    let pId = participantName;
+    const pSheet = ss.getSheetByName('Participant Config');
+    if (pSheet) {
+        const pData = pSheet.getDataRange().getValues();
+        const pRow = pData.find(r => r[1] === participantName);
+        if (pRow) pId = pRow[0]; // ParticipantID
     }
 
-    // Determine initial status based on phone number presence
-    let initialStatus = 'PENDING';
-    if (!phoneNum) {
-      initialStatus = 'SKIPPED_NO_PHONE';
-      console.log(`Skipping SMS for ${entrant.name} - no phone number.`);
-    }
+    const currentPhase = _getConfigValue('CurrentPhase', 'UNKNOWN');
+    const currentRound = _getConfigValue('CurrentRound', 1);
+    const currentDirection = _getConfigValue('CurrentDirection', 'ASCENDING');
+    const activeYear = _getConfigValue('ActiveYear', new Date().getFullYear());
 
-    const rowData = new Array(logHeaders.length).fill('');
-    if (tsIdx !== -1) rowData[tsIdx] = new Date();
-    if (dedupeIdx !== -1) rowData[dedupeIdx] = entrant.dedupeKey;
-    if (nameLogIdx !== -1) rowData[nameLogIdx] = entrant.name;
-    if (roundIdx !== -1) rowData[roundIdx] = entrant.round;
-    if (roleIdx !== -1) rowData[roleIdx] = entrant.role;
-    if (statusIdx !== -1) rowData[statusIdx] = initialStatus;
-
-    logSheet.appendRow(rowData);
-
-    if (initialStatus === 'PENDING') {
-      createdRowIndices.push(nextRowIndex + currentRowOffset);
-    }
-    currentRowOffset++;
-  });
-
-  return createdRowIndices;
+    return `${activeYear}_${currentPhase}_R${currentRound}_${currentDirection}_${pId}${turnActivationId ? '_' + turnActivationId : ''}`;
 }
 
-/**
- * Processes PENDING notifications, making external calls to Twilio.
- * Must run OUTSIDE the script lock.
- * @param {number[]} rowIndices - Indices in the Notification Log sheet
- */
+function computePendingNotifications(beforeWindow, afterWindow, afterRound, currentRound, afterWindowRaw) {
+    const newIndices = [];
+    if (String(_smsDependencies.getProperties()['SMS_NOTIFICATIONS_ENABLED']) !== 'true') return newIndices;
+
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const logSheet = ss.getSheetByName('Notification Log');
+    if (!logSheet) return newIndices;
+
+    const logData = logSheet.getDataRange().getValues();
+    const logHeaders = logData[0] || [];
+    const dedupeIdx = logHeaders.indexOf('DedupeKey');
+    const typeIdx = logHeaders.indexOf('Type');
+
+    if (dedupeIdx === -1) return newIndices;
+
+    const existingKeys = new Set();
+    for (let i = 1; i < logData.length; i++) {
+        let isInitial = true;
+        if (typeIdx !== -1) {
+             isInitial = logData[i][typeIdx] === 'INITIAL';
+        }
+        if (isInitial && logData[i][dedupeIdx]) {
+            existingKeys.add(String(logData[i][dedupeIdx]));
+        }
+    }
+
+    const currentPhase = _getConfigValue('CurrentPhase', 'UNKNOWN');
+
+    for (const p of afterWindow) {
+        if (p.computedStatus === 'Active') {
+            const key = _buildDedupeKey(p.name);
+
+            if (!existingKeys.has(key)) {
+                const role = 'Active Window';
+                const rowData = [
+                    new Date(),
+                    key,
+                    p.name,
+                    currentPhase + ' R' + _getConfigValue('CurrentRound', 1),
+                    role,
+                    'PENDING',
+                    '',
+                    '',
+                    'INITIAL'
+                ];
+
+                logSheet.appendRow(rowData);
+                newIndices.push(logSheet.getLastRow());
+                existingKeys.add(key);
+            }
+        }
+    }
+
+    return newIndices;
+}
+
+function _processScheduledTimers() {
+    if (String(_smsDependencies.getProperties()['SMS_NOTIFICATIONS_ENABLED']) !== 'true') return;
+
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const logSheet = ss.getSheetByName('Notification Log');
+    if (!logSheet) return;
+
+    const currentPhase = _getConfigValue('CurrentPhase', 'UNKNOWN');
+    if (currentPhase === 'SETUP_EMPTY' || currentPhase === 'COMPLETE') return;
+
+    const adminOpts = getAdminOptions();
+    const reminderDelayMin = parseInt(adminOpts['REMINDER_DELAY_MINUTES'] || 360);
+    const alertDelayMin = parseInt(adminOpts['ADMIN_ALERT_DELAY_MINUTES'] || 720);
+    const reminderMs = reminderDelayMin * 60 * 1000;
+    const alertMs = alertDelayMin * 60 * 1000;
+    const now = new Date().getTime();
+
+    const logData = logSheet.getDataRange().getValues();
+    const headers = logData[0];
+    const tsIdx = headers.indexOf('Timestamp');
+    const typeIdx = headers.indexOf('Type');
+    const statusIdx = headers.indexOf('Status');
+    const nameIdx = headers.indexOf('ParticipantName');
+    const keyIdx = headers.indexOf('DedupeKey');
+
+    if (tsIdx === -1 || typeIdx === -1 || statusIdx === -1 || nameIdx === -1 || keyIdx === -1) return;
+
+    const turnSheet = ss.getSheetByName('Turn Management');
+    const queue = calculateQueueWindow(turnSheet.getDataRange().getValues());
+    const activeNames = new Set(queue.filter(p => p.computedStatus === 'Active').map(p => p.name));
+
+    const sentReminders = new Set();
+    const sentAlerts = new Set();
+    for (let i = 1; i < logData.length; i++) {
+        let t = logData[i][typeIdx], st = logData[i][statusIdx], k = logData[i][keyIdx];
+        if (t === 'REMINDER' && (st === 'SENT' || st === 'PROCESSING' || st === 'PENDING')) sentReminders.add(k);
+        if (t === 'ADMIN_ALERT' && (st === 'SENT' || st === 'PROCESSING' || st === 'PENDING')) sentAlerts.add(k);
+    }
+
+    let pendingIndices = [];
+    for (let i = 1; i < logData.length; i++) {
+        if (logData[i][typeIdx] === 'INITIAL' && logData[i][statusIdx] === 'SENT') {
+            let key = logData[i][keyIdx], name = logData[i][nameIdx], entryTs = new Date(logData[i][tsIdx]).getTime();
+            let currentExpectedKey = _buildDedupeKey(name);
+
+            if (activeNames.has(name) && key === currentExpectedKey) {
+                let timeInActive = now - entryTs;
+                if (timeInActive >= reminderMs && !sentReminders.has(key)) {
+                    logSheet.appendRow([ new Date(), key, name, logData[i][headers.indexOf('Round')], 'Reminder', 'PENDING', '', '', 'REMINDER' ]);
+                    pendingIndices.push(logSheet.getLastRow());
+                    sentReminders.add(key);
+                }
+                if (timeInActive >= alertMs && !sentAlerts.has(key)) {
+                    logSheet.appendRow([ new Date(), key, name, logData[i][headers.indexOf('Round')], 'Admin Alert', 'PENDING', '', '', 'ADMIN_ALERT' ]);
+                    pendingIndices.push(logSheet.getLastRow());
+                    sentAlerts.add(key);
+                }
+            }
+        }
+    }
+    if (pendingIndices.length > 0) _processPendingNotifications(pendingIndices);
+}
 
 function _processPendingNotifications(rowIndices) {
   if (!rowIndices || rowIndices.length === 0) return;
