@@ -12,6 +12,37 @@ const appState = {
 };
 
 const appFunctions = {
+  showRulesModal: function(forceGateway = false) {
+    const rulesModal = document.getElementById('rules-modal');
+    const gatewayForm = document.getElementById('rules-gateway-form');
+    const closeBtn = document.getElementById('rules-close-btn');
+    const submitBtn = document.getElementById('rules-submit-btn');
+    const contentDiv = document.getElementById('rules-text-content');
+    rulesModal.classList.remove('hidden');
+    contentDiv.innerHTML = '<div class="skeleton skeleton-text"></div>';
+    if (forceGateway) {
+       gatewayForm.classList.remove('hidden'); closeBtn.classList.add('hidden'); submitBtn.classList.remove('hidden');
+    } else {
+       gatewayForm.classList.add('hidden'); closeBtn.classList.remove('hidden'); submitBtn.classList.add('hidden');
+    }
+    google.script.run.withSuccessHandler(function(res) { contentDiv.innerHTML = res.content || 'No rules defined.'; }).getRulesAndTips(appState.currentUserName || '');
+  },
+  hideRulesModal: function() { document.getElementById('rules-modal').classList.add('hidden'); },
+  submitRulesAcknowledgment: function() {
+    const volunteerSelect = document.getElementById('holiday-volunteer');
+    const transferSelect = document.getElementById('transfer-preference');
+    const agreeCheck = document.getElementById('rules-acknowledge-check');
+    if (!volunteerSelect.value || !transferSelect.value || !agreeCheck.checked) { alert("Please answer all questions."); return; }
+
+    const submitBtn = document.getElementById('rules-submit-btn');
+    submitBtn.textContent = 'Saving...'; submitBtn.disabled = true;
+    google.script.run.withSuccessHandler(function(res) {
+       submitBtn.textContent = 'I Agree & Continue'; submitBtn.disabled = false;
+       if (res.success) { appFunctions.hideRulesModal(); appFunctions.loadDashboard(); }
+       else { alert("Error: " + res.message); }
+    }).submitRulesAcknowledgment({ name: appState.currentUserName, holidayVolunteer: volunteerSelect.value, transferPreference: transferSelect.value });
+  },
+
   init: function() {
     this.fetchPublicData();
     this.fetchParticipantNames();
@@ -458,13 +489,16 @@ const appFunctions = {
       .withSuccessHandler((res) => {
         btn.disabled = false;
         btn.textContent = "Log In";
-        if (res === "Success") {
+        if (res && res.success) {
           appState.currentUserName = name;
           this.renderAuthNav();
-          this.fetchDashboardData();
           this.showToast("Logged in successfully.");
-          // Clear PIN immediately
           document.getElementById('login-pin').value = '';
+          if (res.needsAcknowledgment) {
+              this.showRulesModal(true);
+          } else {
+              this.fetchDashboardData();
+          }
         } else {
           this.showToast("Invalid PIN.", true);
         }

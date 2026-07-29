@@ -19,9 +19,50 @@
       <button type="button" class="theme-menu-item" role="menuitem" data-theme-val="ketamine" onclick="window.appFunctions.setTheme('ketamine')">Ketamine <span></span></button>
     </div>
 
+    <button type="button" id="rules-btn" class="auth-nav-link" onclick="window.appFunctions.showRulesModal()" style="margin-right: 8px;">Rules & Tips</button>
     <button type="button" id="nav-toggle" class="auth-nav-link">Login</button>
   </div>
 </header>
+
+<!-- Rules Modal -->
+<div id="rules-modal" class="modal-overlay hidden">
+  <div class="modal-content" style="max-width: 600px;">
+    <h2>Rules & Tips</h2>
+    <div id="rules-text-content" style="margin-bottom: 20px; max-height: 400px; overflow-y: auto;"></div>
+
+    <div id="rules-gateway-form" class="hidden">
+      <h3>Annual Preferences</h3>
+      <p>Before proceeding, please answer the following questions for this year's selection:</p>
+      <div style="margin-bottom: 15px;">
+        <label for="holiday-volunteer"><strong>I am willing to volunteer for one or more official holiday call positions this year:</strong></label>
+        <select id="holiday-volunteer" required style="width: 100%; padding: 8px;">
+          <option value="" disabled selected>-- Select an option --</option>
+          <option value="Yes">Yes</option>
+          <option value="No">No</option>
+        </select>
+      </div>
+      <div style="margin-bottom: 15px;">
+        <label for="transfer-preference"><strong>Transfer Preference:</strong></label>
+        <select id="transfer-preference" required style="width: 100%; padding: 8px;">
+          <option value="" disabled selected>-- Select an option --</option>
+          <option value="Offer">Offer assignments</option>
+          <option value="Receive">Receive assignments</option>
+          <option value="Both">Both offer and receive</option>
+          <option value="Neither">Do not participate</option>
+        </select>
+      </div>
+      <div style="margin-bottom: 15px;">
+        <input type="checkbox" id="rules-acknowledge-check" required>
+        <label for="rules-acknowledge-check">I have read and acknowledge the Rules & Tips for this year.</label>
+      </div>
+    </div>
+
+    <div class="modal-actions" style="margin-top: 15px; display: flex; justify-content: flex-end; gap: 10px;">
+      <button type="button" id="rules-close-btn" class="btn btn-secondary" onclick="window.appFunctions.hideRulesModal()">Close</button>
+      <button type="button" id="rules-submit-btn" class="btn hidden" onclick="window.appFunctions.submitRulesAcknowledgment()">I Agree & Continue</button>
+    </div>
+  </div>
+</div>
 
 <main class="main-container">
 
@@ -58,16 +99,24 @@
       <div id="dashboard-summary"></div>
 
       <div id="selection-controls" class="hidden" style="margin-top: 1.5rem;">
-        <h3>Make a Selection</h3>
+        <h3 id="phase-selection-title">Make a Selection</h3>
         <p id="selection-rules" class="text-small"></p>
-        <button type="button" id="start-selection-btn" onclick="window.appFunctions.openPrimaryPicker()">Choose your week</button>
-        <!-- The summary of pending choices before confirm -->
+        <button type="button" id="start-selection-btn" onclick="window.appFunctions.openPrimaryPicker()">Choose option</button>
+        <button type="button" id="pass-selection-btn" class="hidden btn btn-secondary" style="margin-top: 0.5rem;" onclick="window.appFunctions.submitPass()">Pass (Opt-out)</button>
+
         <div id="pending-selection-summary" class="hidden" style="margin-top:1rem; padding: 1rem; background-color: var(--bg-color); border-radius: 12px;">
-          <div class="text-bold">Pending Selection</div>
+          <div class="text-bold" id="pending-selection-header">Pending Selection</div>
           <div id="pending-weeks-list" style="margin-top: 0.5rem; margin-bottom: 1rem;"></div>
-          <div id="review-actions-container">
-            <!-- Review actions generated dynamically via JS -->
+
+          <div id="holiday-prompt-container" class="hidden" style="margin-bottom: 1rem; border: 1px solid var(--accent-color); padding: 10px; border-radius: 6px; background-color: var(--available-tint);">
+               <div class="text-bold">Optional: Nearby Holiday</div>
+               <p id="holiday-prompt-text" class="text-small"></p>
+               <select id="holiday-prompt-select" style="width: 100%; padding: 8px; margin-top: 5px;">
+                   <option value="">No, decline holiday</option>
+               </select>
           </div>
+
+          <div id="review-actions-container"></div>
         </div>
       </div>
     </div>
