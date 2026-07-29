@@ -120,13 +120,16 @@ function normalizeClassification(value) {
 }
 
 function buildAvailableWeekData(rows) {
-  return rows
-    .filter(row => Number(row[6]) > 0)
+  // Now row schema: Date, Classif, MaxCap, SpotsRemaining, Special, AssignedTo
+  if (rows.length === 0) return [];
+  return rows.slice(1)
+    .filter(row => Number(row[3]) > 0)
     .map(row => ({
       displayDate: row[0] instanceof Date ? row[0].toLocaleDateString("en-US", { timeZone: "UTC", month: 'short', day: 'numeric' }) : String(row[0]),
       valueDate: row[0] instanceof Date ? row[0].getTime() : null,
       classification: normalizeClassification(row[1]),
-      spotsRemaining: Number(row[6]),
+      spotsRemaining: Number(row[3]),
+      specialWeek: row[4],
       originalClassification: row[1]
     }));
 }
@@ -339,9 +342,16 @@ function refreshThemeColorSwatches() {
 
 function getParticipantNames() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName('Turn Management');
-  const names = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getValues();
-  return names.flat();
+  const sheet = ss.getSheetByName('Participant Config');
+  if (!sheet) return [];
+  const data = sheet.getDataRange().getValues();
+  const nameIdx = data[0].indexOf('Name');
+  if (nameIdx === -1) return [];
+  const names = [];
+  for (let i = 1; i < data.length; i++) {
+     if (data[i][nameIdx]) names.push(data[i][nameIdx]);
+  }
+  return names;
 }
 function verifyUser(name, pin) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -615,12 +625,16 @@ function _processVacationSelection(selectionData, ss, turnSheet, participantShee
 
     let countPrime = 0, countNonPrime = 0;
     const checkWeek = (row, idx) => {
-        let spots = parseInt(row[6]);
+        let maxCap = parseInt(row[2]) || parseInt(globalCap);
+        let assignedStr = String(row[5] || '');
+        let assignedArr = assignedStr ? assignedStr.split(',').map(n => n.trim()) : [];
+        let spots = maxCap - assignedArr.length;
+
         let classif = String(row[1] || '').trim().toLowerCase() === 'prime' ? 'Prime' : 'Non-Prime';
-        let special = row[7];
+        let special = row[4];
 
         if (spots <= 0) return "Week has zero spots remaining.";
-        for (let j=2; j<=5; j++) if (row[j] === name) return "You already hold a spot in this week.";
+        if (assignedArr.includes(name)) return "You already hold a spot in this week.";
 
         if (classif === 'Prime') countPrime++; else countNonPrime++;
         if (currentRound <= 3) {
@@ -635,10 +649,17 @@ function _processVacationSelection(selectionData, ss, turnSheet, participantShee
 
     if (countPrime > 1) return { success: false, message: "You may only select ONE Prime week per turn." };
     if (countPrime === 1 && countNonPrime > 0) return { success: false, message: "A Prime selection must stand alone." };
+    if (_getConfigValue('CurrentPhase') === 'VACATION_SENIORITY' && (countPrime + countNonPrime) > 1) {
+        return { success: false, message: "During the Seniority Round, you may only select EXACTLY ONE week per turn." };
+    }
 
     let totalAssignmentsNow = 0;
     for (let i = 1; i < weekDataRaw.length; i++) {
-       for (let j=2; j<=5; j++) if (weekDataRaw[i][j] === name) totalAssignmentsNow++;
+       let assignedStr = String(weekDataRaw[i][5] || '');
+       if (assignedStr) {
+           let assignedArr = assignedStr.split(',').map(n => n.trim());
+           if (assignedArr.includes(name)) totalAssignmentsNow++;
+       }
     }
 
     let attemptingToTake = (w1Row ? 1 : 0) + (w2Row ? 1 : 0);
@@ -647,15 +668,17 @@ function _processVacationSelection(selectionData, ss, turnSheet, participantShee
     }
 
     const assignWeek = (row, idx) => {
-        let assigned = false;
-        for (let j = 2; j <= 5; j++) {
-            if (row[j] === '') {
-                weekSheet.getRange(idx + 1, j + 1).setValue(name);
-                weekSheet.getRange(idx + 1, 7).setValue(parseInt(row[6]) - 1);
-                assigned = true; break;
-            }
+        let maxCap = parseInt(row[2]) || parseInt(globalCap);
+        let assignedStr = String(row[5] || '');
+        let assignedArr = assignedStr ? assignedStr.split(',').map(n => n.trim()) : [];
+
+        if (assignedArr.length < maxCap) {
+            assignedArr.push(name);
+            weekSheet.getRange(idx + 1, 6).setValue(assignedArr.join(', '));
+            weekSheet.getRange(idx + 1, 4).setValue(maxCap - assignedArr.length);
+            return true;
         }
-        return assigned;
+        return false;
     };
 
     if (w1Row && !assignWeek(w1Row, w1Idx)) return { success: false, message: "Concurrency error: Week 1 filled up." };
@@ -827,7 +850,34 @@ function _processTransferOffer(selectionData, ss, turnSheet, participantSheet) {
     if (offers && offers.length > 0) {
         const transferSheet = ss.getSheetByName('Transfer Offers');
         const nextId = transferSheet.getLastRow();
-        const rowsToWrite = offers.map((o, i) => ['OFFER-' + (nextId + i), name, o.type, o.dateEpoch, o.details, 'Open', '']);
+        const rowsToWrite = [];
+
+        const wSheet = ss.getSheetByName('Weekend Coverage');
+        const wData = wSheet.getDataRange().getValues();
+        const hSheet = ss.getSheetByName('Holiday Coverage');
+        const hData = hSheet.getDataRange().getValues();
+
+        for (let i = 0; i < offers.length; i++) {
+            let o = offers[i];
+            let isValid = false;
+            if (o.type === 'Weekend') {
+                let day = o.details.indexOf('Saturday') !== -1 ? 'Saturday' : 'Sunday';
+                for (let k = 1; k < wData.length; k++) {
+                    if (new Date(wData[k][0]).getTime() === o.dateEpoch && wData[k][1] === day && wData[k][3] === name) {
+                        isValid = true; break;
+                    }
+                }
+            } else if (o.type === 'Holiday') {
+                for (let k = 1; k < hData.length; k++) {
+                    if (new Date(hData[k][1]).getTime() === o.dateEpoch && hData[k][2] === o.details && hData[k][3] === name) {
+                        isValid = true; break;
+                    }
+                }
+            }
+            if (!isValid) return { success: false, message: "You do not own one or more of the offered assignments: " + o.details };
+            rowsToWrite.push(['OFFER-' + (nextId + i), name, o.type, o.dateEpoch, o.details, 'Open', '']);
+        }
+
         transferSheet.getRange(transferSheet.getLastRow() + 1, 1, rowsToWrite.length, 7).setValues(rowsToWrite);
     }
     let userRowIdx = turnSheet.getDataRange().getValues().findIndex(row => row[0] === name) + 1;
@@ -867,7 +917,36 @@ function _processTransferSelection(selectionData, ss, turnSheet, participantShee
     if (targetRowIdx === -1) return { success: false, message: "Offer not found." };
     if (offer[5] !== 'Open') return { success: false, message: "That offer was just accepted by another participant." };
 
-    const type = offer[2], dateEpoch = Number(offer[3]), details = offer[4];
+    const type = offer[2], dateEpoch = Number(offer[3]), details = offer[4], giver = offer[1];
+
+    // Verify giver still owns it before moving
+    if (type === 'Weekend') {
+        const wSheet = ss.getSheetByName('Weekend Coverage');
+        const wData = wSheet.getDataRange().getValues();
+        let day = details.indexOf('Saturday') !== -1 ? 'Saturday' : 'Sunday';
+        let verifyTargetIdx = -1;
+        for (let i = 1; i < wData.length; i++) {
+            if (new Date(wData[i][0]).getTime() === dateEpoch && wData[i][1] === day) {
+                if (wData[i][3] !== giver) return { success: false, message: "The original giver no longer holds this assignment." };
+                verifyTargetIdx = i;
+                break;
+            }
+        }
+        if (verifyTargetIdx === -1) return { success: false, message: "Assignment no longer exists." };
+    } else if (type === 'Holiday') {
+        const hSheet = ss.getSheetByName('Holiday Coverage');
+        const hData = hSheet.getDataRange().getValues();
+        let verifyTargetIdx = -1;
+        for (let i = 1; i < hData.length; i++) {
+            if (new Date(hData[i][1]).getTime() === dateEpoch && hData[i][2] === details) {
+                if (hData[i][3] !== giver) return { success: false, message: "The original giver no longer holds this assignment." };
+                verifyTargetIdx = i;
+                break;
+            }
+        }
+        if (verifyTargetIdx === -1) return { success: false, message: "Assignment no longer exists." };
+    }
+
     if (type === 'Weekend') {
         const wSheet = ss.getSheetByName('Weekend Coverage');
         const wData = wSheet.getDataRange().getValues();
@@ -899,280 +978,6 @@ function _processTransferSelection(selectionData, ss, turnSheet, participantShee
     ss.getSheetByName('Transfer History').appendRow([ new Date(), _getConfigValue('ActiveYear', new Date().getFullYear()), type, new Date(dateEpoch), details, offer[1], name ]);
     turnSheet.getRange(userRowIdx, turnStatusCol).setValue('Completed');
     return { success: true, message: "Transfer accepted successfully." };
-}
-
-function processSelection(selectionData) {
-  const lock = LockService.getScriptLock();
-  lock.waitLock(30000);
-  let pendingRowIndices = [];
-  let finalResult = null;
-  try {
-    const res = _processSelectionCore(selectionData);
-    finalResult = res.coreResult;
-    pendingRowIndices = res.createdRowIndices || [];
-  } finally {
-    lock.releaseLock();
-  }
-
-  if (pendingRowIndices && pendingRowIndices.length > 0) {
-    try {
-      _processPendingNotifications(pendingRowIndices);
-    } catch (e) {
-      console.error("SMS notification processing failed, but selection succeeded: " + e.message);
-    }
-  }
-
-  return finalResult;
-}
-
-function _processSelectionCore(selectionData) {
-  // Inner lock removed, managed by wrapper
-  try {
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const turnSheet = ss.getSheetByName('Turn Management');
-    const weekSheet = ss.getSheetByName('Week Availability');
-    const configSheet = ss.getSheetByName('Config');
-
-    // Capture before state outside of the inner closure
-    const beforeRound = configSheet.getRange("B2").getValue();
-    const beforeWindowRaw = turnSheet.getDataRange().getValues();
-    const beforeWindow = calculateQueueWindow(beforeWindowRaw, beforeRound);
-
-    let coreResult = null;
-    const executeLogic = () => {
-    let turnDataRaw = turnSheet.getDataRange().getValues();
-    const currentRound = beforeRound;
-
-    // Check if selection is started
-    if (!isSelectionStarted()) {
-        return { success: false, message: "The vacation selection process has not started yet." };
-    }
-
-    // Schema validation
-    const schemaCheck = validateSchema(turnDataRaw, currentRound);
-    if (!schemaCheck.valid) { return { success: false, message: "System setup error: " + schemaCheck.message }; }
-
-    // Check if system is completely full
-    const weekDataRaw = weekSheet.getDataRange().getValues();
-    const weekData = weekDataRaw.slice(1);
-    let totalSpotsRemaining = 0;
-    weekData.forEach(row => {
-        let empty = 0;
-        for(let i=2; i<=5; i++) { if (!row[i]) empty++; }
-        totalSpotsRemaining += empty;
-    });
-    if (totalSpotsRemaining === 0) {
-        return { success: false, message: "Selection Complete: All available vacation slots are filled." };
-    }
-
-    const turnHeaders = turnDataRaw[0];
-    const turnData = turnDataRaw.slice(1);
-
-    const nameIdx = turnHeaders.indexOf('Name');
-    const statusIdx = turnHeaders.indexOf('Status');
-    const weeksSelectedIdx = turnHeaders.indexOf('WeeksSelected');
-    const senPosIdx = turnHeaders.indexOf('SeniorityPosition');
-    const lotPosIdx = turnHeaders.indexOf('LotteryPosition');
-    const skipIdx = turnHeaders.indexOf('SkipNextTurn');
-
-    const queueWindow = calculateQueueWindow(turnDataRaw, currentRound);
-    const userObj = queueWindow.find(p => p.name === selectionData.name);
-
-    if (!userObj) { return { success: false, message: "User not found." }; }
-
-    if (!['Active', 'Standby', 'Backup'].includes(userObj.computedStatus)) {
-        return { success: false, message: "It is not your turn to make a selection." };
-    }
-
-    // We also need the userRowIndex in the original turnData array
-    const userRowIndex = turnData.findIndex(row => row[nameIdx] === selectionData.name);
-
-    if (!selectionData.week1) {
-        return { success: false, message: "Missing primary week selection." };
-    }
-
-    if (currentRound === 1 && selectionData.week2) {
-        return { success: false, message: "Invalid selection. You can only select exactly ONE week during Round 1." };
-    }
-
-    if (selectionData.week1 === selectionData.week2) {
-        return { success: false, message: "You cannot select the same week twice in one submission." };
-    }
-
-    let w1Index = weekData.findIndex(row => row[0].getTime() == selectionData.week1);
-    let w2Index = selectionData.week2 ? weekData.findIndex(row => row[0].getTime() == selectionData.week2) : -1;
-
-    if (w1Index === -1 || (selectionData.week2 && w2Index === -1)) {
-        return { success: false, message: "One of the selected weeks does not exist." };
-    }
-
-    let w1Data = weekData[w1Index];
-    let w2Data = selectionData.week2 ? weekData[w2Index] : null;
-
-    // Validate classifications tightly on the backend before making any writes
-    const class1 = normalizeClassification(w1Data[1]);
-    const class2 = w2Data ? normalizeClassification(w2Data[1]) : null;
-
-    if (!class1 || (w2Data && !class2)) {
-        return { success: false, message: "Selected week has an invalid classification." };
-    }
-
-    if (w2Data && (class1 !== "Non-Prime" || class2 !== "Non-Prime")) {
-        return { success: false, message: "Two-week selections must both be Non-Prime." };
-    }
-
-    // Check max capacity and existing spots
-    let w1EmptySlots = 0;
-    for (let i=2; i<=5; i++) { if (!w1Data[i]) w1EmptySlots++; }
-    if (w1EmptySlots === 0) return { success: false, message: "Primary week is full." };
-
-    if (w2Data) {
-        let w2EmptySlots = 0;
-        for (let i=2; i<=5; i++) { if (!w2Data[i]) w2EmptySlots++; }
-        if (w2EmptySlots === 0) return { success: false, message: "Secondary week is full." };
-    }
-
-    // Check double booking in the same week
-    for(let i=2; i<=5; i++){
-        if (w1Data[i] === selectionData.name) return { success: false, message: "You are already booked for the primary week." };
-        if (w2Data && w2Data[i] === selectionData.name) return { success: false, message: "You are already booked for the secondary week." };
-    }
-
-    // If validation passes, apply changes atomically.
-    let w1TargetCol = -1;
-    for(let i=2; i<=5; i++){
-        if(!weekSheet.getRange(w1Index + 2, i + 1).getValue()) {
-            w1TargetCol = i + 1;
-            break;
-        }
-    }
-    if (w1TargetCol === -1) throw new Error("Concurrency error: primary week filled up.");
-
-    let w2TargetCol = -1;
-    if (selectionData.week2) {
-        for(let i=2; i<=5; i++){
-            if(!weekSheet.getRange(w2Index + 2, i + 1).getValue()) {
-                w2TargetCol = i + 1;
-                break;
-            }
-        }
-        if (w2TargetCol === -1) throw new Error("Concurrency error: secondary week filled up.");
-    }
-
-    // Perform writes
-    weekSheet.getRange(w1Index + 2, w1TargetCol).setValue(selectionData.name);
-    weekSheet.getRange(w1Index + 2, 7).setValue(w1EmptySlots - 1);
-    totalSpotsRemaining -= 1;
-
-    if (selectionData.week2) {
-        weekSheet.getRange(w2Index + 2, w2TargetCol).setValue(selectionData.name);
-        let currentSpots = (w2Data ? (4 - (w2Data.filter((_, idx) => idx >= 2 && idx <= 5 && w2Data[idx]).length)) : 0);
-        let newW2Spots = Math.max(0, currentSpots - 1);
-        weekSheet.getRange(w2Index + 2, 7).setValue(newW2Spots);
-        totalSpotsRemaining -= 1;
-    }
-
-    // Update Turn Sheet for current user
-    const weeksPickedCount = selectionData.week2 ? 2 : 1;
-    const currentWeeksSelected = turnData[userRowIndex][weeksSelectedIdx];
-    turnSheet.getRange(userRowIndex + 2, weeksSelectedIdx + 1).setValue(currentWeeksSelected + weeksPickedCount);
-    turnSheet.getRange(userRowIndex + 2, statusIdx + 1).setValue('Completed');
-
-    if (selectionData.week2) {
-        turnSheet.getRange(userRowIndex + 2, skipIdx + 1).setValue(true);
-    }
-
-    // If we just filled the last spot in the whole sheet, clear queue and exit early
-    if (totalSpotsRemaining === 0) {
-        return { success: true, message: "Selection recorded. Selection process is now complete." };
-    }
-
-    // Since authorization relies on computed queue window and 'Completed' status,
-    // we don't strictly need to write 'Waiting', 'Active', etc. to the sheet anymore
-    // except for skips. Let's consume skips that fall within the *new* window.
-    // Wait, the rule says: "Consume skips only under the script lock during state transitions."
-    // If a person inside the new 3-person window has SkipNextTurn = true, we consume it and mark them Completed.
-
-    let loopGuard = 0;
-    let nextRound = currentRound;
-
-    while (loopGuard < 100) {
-        loopGuard++;
-        let currentTurnDataRaw = turnSheet.getDataRange().getValues();
-        let queueWindowData = calculateQueueWindow(currentTurnDataRaw, nextRound);
-
-        // Find if anyone in the new window (offset 0, 1, 2 from anchor) has skipNextTurn = true
-        let anchorIndex = queueWindowData.findIndex(person => person.status !== 'Completed');
-
-        if (anchorIndex === -1) {
-             // Round is over
-             if (nextRound === 1) {
-                 // Try to automatically transition to Round 2
-                 const transitionResult = _transitionToRound2(turnSheet, configSheet, turnSheet.getDataRange().getValues());
-                 if (!transitionResult.success) {
-                     // Transition failed, stay in Round 1, but selection was successful
-                     return { success: true, message: "Selection recorded. Round 1 complete. Could not auto-start Round 2: " + transitionResult.message };
-                 }
-                 // Transition succeeded, move to Round 2 processing
-                 nextRound++;
-                 turnDataRaw = turnSheet.getDataRange().getValues(); // Refresh stale memory data
-                 continue;
-             } else {
-                 nextRound++;
-                 configSheet.getRange("B2").setValue(nextRound);
-                 let rows = turnSheet.getDataRange().getValues();
-                 rows.shift();
-                 rows.forEach((row, index) => {
-                     turnSheet.getRange(index + 2, statusIdx + 1).setValue('Waiting');
-                 });
-                 turnDataRaw = turnSheet.getDataRange().getValues(); // Refresh stale memory data
-                 continue; // re-evaluate for the new round
-             }
-        }
-
-        let skippedSomeone = false;
-        for (let offset = 0; offset < 3; offset++) {
-            const personIndex = anchorIndex + offset;
-            if (personIndex < queueWindowData.length) {
-                let person = queueWindowData[personIndex];
-                if (person.status !== 'Completed' && person.skipNextTurn === true) {
-                    // Consume skip
-                    let originalDataRow = turnData.findIndex(row => row[nameIdx] === person.name);
-                    turnSheet.getRange(originalDataRow + 2, skipIdx + 1).setValue(false);
-                    turnSheet.getRange(originalDataRow + 2, statusIdx + 1).setValue('Completed');
-                    skippedSomeone = true;
-                }
-            }
-        }
-
-        if (!skippedSomeone) {
-            break; // stable state
-        }
-    }
-
-    return { success: true, message: "Selection recorded." };
-      }; // end executeLogic
-    coreResult = executeLogic();
-    if (!coreResult || !coreResult.success) {
-      return { coreResult: coreResult || { success: false, message: "Unknown error" }, createdRowIndices: [] };
-    }
-
-    // Success path: compute after window and generated notifications
-    const afterRound = configSheet.getRange("B2").getValue();
-    const afterWindowRaw = turnSheet.getDataRange().getValues();
-    const afterWindow = calculateQueueWindow(afterWindowRaw, afterRound);
-
-    let createdRowIndices = [];
-    try {
-      createdRowIndices = computePendingNotifications(beforeWindow, afterWindow, afterRound, beforeRound, afterWindowRaw);
-    } catch (err) {
-      console.error("Failed to compute pending notifications: " + err.message);
-      createdRowIndices = [];
-    }
-    return { coreResult, createdRowIndices };
-  } catch (e) {
-    return { coreResult: { success: false, message: "An error occurred: " + e.message } };
-  }
 }
 
 function testQueueWindowBehavior() {

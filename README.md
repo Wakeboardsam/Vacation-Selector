@@ -27,4 +27,10 @@ When direct manual edits are made to assignments on the sheet, the admin must ru
 5. **Transfer Phase:** Givers offer multiple assignments as single items into a locked pool. Receivers then claim them via serpentine queue order.
 
 ## Testing & Automation
-Tests verify strict multi-person directional bounds, concurrency lock wins, API credential masking, auto-fill blocking, and stable deduplicated SMS notification timers (360-min reminder, 720-min admin alert). See Code.gs for the full suite execution details.
+Tests verify strict multi-person directional bounds, concurrency lock wins, API credential masking, auto-fill blocking, and stable deduplicated SMS notification timers (360-min reminder, 720-min admin alert).
+
+### Passed Tests
+- `testStrictSerpentineBoundary`: PASS (verified boundary pausing).
+- `testTransferOfferLocking`: PASS (verified pool lock checks).
+- `testTwilioTokenNonExposure`: PASS (verified API data masking).
+- `testQueueWindowBehavior`: PASS (verified Active assignment queue).
