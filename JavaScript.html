@@ -45,6 +45,7 @@ const appFunctions = {
        } else { alert("Error: " + res.message); }
     }).submitRulesAcknowledgment({ name: appState.currentUserName, holidayVolunteer: volunteerSelect.value, transferPreference: transferSelect.value });
   },
+  loadDashboard: function() { this.fetchDashboardData(); },
 
   init: function() {
     this.fetchPublicData();

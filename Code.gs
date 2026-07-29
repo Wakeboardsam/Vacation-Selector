@@ -1,5 +1,3 @@
-// Final complete Code.gs file - Adds turn data to public view
-
 // Theme color configuration constants
 const ALLOWED_THEME_VARIABLES = [
   '--bg-color', '--surface-main', '--text-primary', '--text-secondary',
@@ -338,8 +336,30 @@ function refreshThemeColorSwatches() {
 }
 
 
+function include(filename) {
+  return HtmlService.createHtmlOutputFromFile(filename).getContent();
+}
+
+function doGet(e) {
+  const template = HtmlService.createTemplateFromFile('Index');
+  const themeConfig = getThemeColorConfig();
+  template.themeOverridesCss = buildThemeOverridesCss(themeConfig);
+  return template
+    .evaluate()
+    .setTitle('Vacation Week Selection System')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}
+
+function normalizeClassification(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'prime') return 'Prime';
+  if (normalized === 'non-prime' || normalized === 'non prime' || normalized === 'nonprime') return 'Non-Prime';
+  return null;
+}
+
+
 // ============================================================================
-// CONFIGURATION AND UTILS
+// CONFIGURATION & UTILS
 // ============================================================================
 
 function _getConfigValue(key, defaultValue) {
@@ -376,31 +396,22 @@ function getAdminPhoneNumber() {
   return getAdminOptions()['ADMIN_PHONE'] || '';
 }
 
-var _smsDependencies = {
-  getProperties: () => {
-    const o = getAdminOptions();
-    return {
-      SMS_NOTIFICATIONS_ENABLED: String(o['SMS_ENABLED'] || 'false').toLowerCase(),
-      TWILIO_ACCOUNT_SID: o['TWILIO_ACCOUNT_SID'] || '',
-      TWILIO_AUTH_TOKEN: o['TWILIO_AUTH_TOKEN'] || '',
-      TWILIO_FROM_NUMBER: o['TWILIO_FROM_NUMBER'] || '',
-      VACATION_SELECTOR_URL: ScriptApp.getService().getUrl()
-    };
-  },
-  fetch: (url, params) => UrlFetchApp.fetch(url, params)
-};
+function _getGlobalVacationCap() {
+    return parseInt(getAdminOptions()['DEFAULT_VACATION_CAPACITY'] || 4);
+}
 
 // ============================================================================
-// MIGRATION AND SETUP
+// SAFE SCHEMA MIGRATION
 // ============================================================================
 
 function setupSpreadsheetSchema() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   let modifications = false;
 
-  // Safe Migration to Participant Config
+  // 1. Safe Migration from Turn Management to Participant Config
   let pConfigSheet = ss.getSheetByName('Participant Config');
   const turnSheet = ss.getSheetByName('Turn Management');
+
   if (!pConfigSheet) {
       pConfigSheet = ss.insertSheet('Participant Config');
       const pHeaders = [
@@ -440,6 +451,7 @@ function setupSpreadsheetSchema() {
       modifications = true;
   }
 
+  // 2. Setup Config & Admin Options
   const sheets = [
       { name: 'Admin Options', headers: ['Setting Name', 'Setting Value', 'Description'] },
       { name: 'Rules & Tips', headers: ['Rules & Tips Content (Markdown/HTML supported)'] },
@@ -497,7 +509,8 @@ function setupSpreadsheetSchema() {
       }
   }
 
-  // Safe schema update for Week Availability
+  // 3. Safe idempotent migration of Week Availability to configurable capacity schema
+  // Without calling clear()!
   const weekSheet = ss.getSheetByName('Week Availability');
   if (weekSheet && weekSheet.getLastRow() > 1) {
       const h = weekSheet.getRange(1, 1, 1, weekSheet.getLastColumn()).getValues()[0];
@@ -508,19 +521,31 @@ function setupSpreadsheetSchema() {
           for (let i = 1; i < wData.length; i++) {
               let assigned = [];
               for (let j = 2; j <= 5; j++) if (wData[i][j]) assigned.push(wData[i][j]);
+              // Date, Classif, MaxCap, SpotsRemaining, Special Week, AssignedTo
               newRows.push([wData[i][0], wData[i][1], defCap, Math.max(0, defCap - assigned.length), 'None', assigned.join(', ')]);
           }
-          weekSheet.clear();
+          // Do not delete rows, just overwrite and resize columns
           weekSheet.getRange(1, 1, 1, 6).setValues([['WeekStartDate', 'Classification', 'MaxCapacity', 'SpotsRemaining', 'Special Week', 'AssignedTo']]);
           if (newRows.length > 0) weekSheet.getRange(2, 1, newRows.length, 6).setValues(newRows);
+          // Clear remaining old columns (if any)
+          if (weekSheet.getLastColumn() > 6) {
+              weekSheet.getRange(1, 7, weekSheet.getLastRow(), weekSheet.getLastColumn() - 6).clearContent();
+          }
           modifications = true;
       }
   }
 
-  // Schema Validation Hook
-  if (turnSheet && turnSheet.getRange(1, turnSheet.getLastColumn()).getValue() !== 'SkipNextTurn') {
-      if (turnSheet.getRange(1, 1, 1, turnSheet.getLastColumn()).getValues()[0].indexOf('SkipNextTurn') === -1) {
-          turnSheet.getRange(1, turnSheet.getLastColumn() + 1).setValue('SkipNextTurn');
+  // 4. Ensure Turn Management has SkipNextTurn
+  if (turnSheet) {
+      let tHeaders = turnSheet.getRange(1, 1, 1, turnSheet.getLastColumn()).getValues()[0];
+      if (tHeaders.indexOf('SkipNextTurn') === -1) {
+          turnSheet.getRange(1, tHeaders.length + 1).setValue('SkipNextTurn');
+          if (turnSheet.getLastRow() > 1) {
+              turnSheet.getRange(2, tHeaders.length + 1, turnSheet.getLastRow() - 1, 1).setValue(false);
+          }
+      }
+      if (tHeaders.indexOf('Status') === -1) {
+          turnSheet.getRange(1, turnSheet.getLastColumn() + 1).setValue('Status');
       }
   }
 
@@ -534,6 +559,11 @@ function validateSchema() {
     }
     return { valid: true };
 }
+
+
+// ============================================================================
+// AUTO-FILL & SETUP PREFLIGHT
+// ============================================================================
 
 function checkNewYearSetupReadiness() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -550,7 +580,11 @@ function checkNewYearSetupReadiness() {
   for (let c of checks) {
       let sheet = ss.getSheetByName(c.name);
       if (sheet && sheet.getLastRow() > 1 && c.checkContent) {
-          blockers.push(`${c.name} contains data.`);
+          let data = sheet.getDataRange().getValues();
+          // We only care if there is actual data in the rows (e.g. past row 1)
+          if (data.slice(1).some(row => row.some(cell => String(cell).trim() !== ''))) {
+              blockers.push(`${c.name} contains data. Please clear the rows below the header.`);
+          }
       }
   }
 
@@ -558,14 +592,14 @@ function checkNewYearSetupReadiness() {
   if (pSheet && pSheet.getLastRow() > 1) {
       let data = pSheet.getDataRange().getValues();
       let ackIdx = data[0].indexOf('Rules Acknowledged Year');
-      if (data.slice(1).some(r => r[ackIdx])) blockers.push("Participant Config contains Rules Acknowledged Year data.");
+      if (ackIdx !== -1 && data.slice(1).some(r => r[ackIdx])) blockers.push("Participant Config contains Rules Acknowledged Year data. Please clear this column.");
   }
 
   let tSheet = ss.getSheetByName('Turn Management');
   if (tSheet && tSheet.getLastRow() > 1) {
       let data = tSheet.getDataRange().getValues();
       let statIdx = data[0].indexOf('Status');
-      if (data.slice(1).some(r => r[statIdx])) blockers.push("Turn Management contains active queue status.");
+      if (statIdx !== -1 && data.slice(1).some(r => r[statIdx])) blockers.push("Turn Management contains active queue status. Please clear this column.");
   }
 
   if (blockers.length === 0) {
@@ -573,6 +607,42 @@ function checkNewYearSetupReadiness() {
     return { ready: true, message: "System is clean and ready." };
   }
   return { ready: false, message: "Setup Blocked:\n" + blockers.join('\n') };
+}
+
+function _calculateThanksgiving(year) {
+    // Thanksgiving is the fourth Thursday of November
+    let d = new Date(year, 10, 1);
+    let day = d.getDay();
+    let offset = (day <= 4) ? (4 - day) : (11 - day);
+    d.setDate(1 + offset + 21); // First thursday + 3 weeks
+    return d;
+}
+
+function _calculateEaster(year) {
+    let f = Math.floor,
+        G = year % 19,
+        C = f(year / 100),
+        H = (C - f(C / 4) - f((8 * C + 13) / 25) + 19 * G + 15) % 30,
+        I = H - f(H / 28) * (1 - f(29 / (H + 1)) * f((21 - G) / 11)),
+        J = (year + f(year / 4) + I + 2 - C + f(C / 4)) % 7,
+        L = I - J,
+        month = 3 + f((L + 40) / 44),
+        day = L + 28 - 31 * f(month / 4);
+    return new Date(year, month - 1, day);
+}
+
+function _calculateMemorialDay(year) {
+    // Last Monday of May
+    let d = new Date(year, 4, 31);
+    while (d.getDay() !== 1) d.setDate(d.getDate() - 1);
+    return d;
+}
+
+function _calculateLaborDay(year) {
+    // First Monday of September
+    let d = new Date(year, 8, 1);
+    while (d.getDay() !== 1) d.setDate(d.getDate() + 1);
+    return d;
 }
 
 function autoFillRandomize(year, confirmYear) {
@@ -586,75 +656,118 @@ function autoFillRandomize(year, confirmYear) {
   _setConfigValue('SetupState', 'SETUP_REVIEW');
 
   const defCap = parseInt(getAdminOptions()['DEFAULT_VACATION_CAPACITY'] || 4);
-  let mon = new Date(year, 0, 1);
-  mon.setDate(mon.getDate() - (mon.getDay() === 0 ? 6 : mon.getDay() - 1));
+
+  // Vacation Weeks: Monday on or before Jan 1 through Monday on or before Dec 31
+  let currentMonday = new Date(year, 0, 1);
+  currentMonday.setDate(currentMonday.getDate() - (currentMonday.getDay() === 0 ? 6 : currentMonday.getDay() - 1));
 
   let wData = [];
   while (true) {
-      let s = new Date(mon), e = new Date(mon); e.setDate(e.getDate() + 4);
-      let isX = (s.getMonth()===11 && s.getDate()>=21) || (e.getMonth()===11 && e.getDate()<=27);
-      wData.push([s, (s.getMonth()>=5 && s.getMonth()<=7)?'Prime':'Non-Prime', defCap, defCap, isX?'Christmas':'None', '']);
-      mon.setDate(mon.getDate() + 7);
-      if (mon.getFullYear() > year) break;
-  }
-  ss.getSheetByName('Week Availability').getRange(2, 1, wData.length, 6).setValues(wData);
+      let s = new Date(currentMonday);
+      let e = new Date(currentMonday);
+      e.setDate(e.getDate() + 4);
 
-  mon = new Date(year, 0, 1);
-  mon.setDate(mon.getDate() - (mon.getDay() === 0 ? 6 : mon.getDay() - 1));
-  let wSat = new Date(mon); wSat.setDate(wSat.getDate() + 5);
+      let isChristmas = (s.getMonth()===11 && s.getDate()>=21) || (e.getMonth()===11 && e.getDate()<=27);
+      let isPrime = (s.getMonth()>=5 && s.getMonth()<=7) ? 'Prime' : 'Non-Prime'; // Jun, Jul, Aug
+
+      wData.push([s, isPrime, defCap, defCap, isChristmas ? 'Christmas' : 'None', '']);
+
+      currentMonday.setDate(currentMonday.getDate() + 7);
+      // End with Monday on or before December 31.
+      // So if the next Monday is > Dec 31, we break.
+      if (currentMonday.getFullYear() > year) break;
+  }
+
+  const wSheet = ss.getSheetByName('Week Availability');
+  wSheet.getRange(1, 1, 1, 6).setValues([['WeekStartDate', 'Classification', 'MaxCapacity', 'SpotsRemaining', 'Special Week', 'AssignedTo']]);
+  wSheet.getRange(2, 1, wData.length, 6).setValues(wData);
+
+  // Weekend Coverage
+  currentMonday = new Date(year, 0, 1);
+  currentMonday.setDate(currentMonday.getDate() - (currentMonday.getDay() === 0 ? 6 : currentMonday.getDay() - 1));
+  let wSat = new Date(currentMonday);
+  wSat.setDate(wSat.getDate() + 5);
+
   let wkData = [];
   while (wSat.getFullYear() <= year || wSat.getMonth() === 0) {
-      let sat = new Date(wSat), sun = new Date(wSat); sun.setDate(sun.getDate()+1);
+      let sat = new Date(wSat), sun = new Date(wSat);
+      sun.setDate(sun.getDate()+1);
       wkData.push([sat, 'Saturday', 'First Call', '', ''], [sun, 'Sunday', 'First Call', '', '']);
       wSat.setDate(wSat.getDate()+7);
       if (wSat.getFullYear() > year && wSat.getMonth() > 0) break;
   }
-  ss.getSheetByName('Weekend Coverage').getRange(2, 1, wkData.length, 5).setValues(wkData);
+  const wkSheet = ss.getSheetByName('Weekend Coverage');
+  wkSheet.getRange(1, 1, 1, 5).setValues([['Date', 'Day of Week', 'Position', 'Participant', 'Warning/Holiday Near']]);
+  wkSheet.getRange(2, 1, wkData.length, 5).setValues(wkData);
 
+  // Holidays
   const hData = [
     ['New Year\'s Day', new Date(year, 0, 1), 'Call 1', ''], ['New Year\'s Day', new Date(year, 0, 1), 'Call 2', ''],
-    ['Memorial Day', new Date(year, 4, 25), 'Call 1', ''], ['Memorial Day', new Date(year, 4, 25), 'Call 2', ''],
+    ['Memorial Day', _calculateMemorialDay(year), 'Call 1', ''], ['Memorial Day', _calculateMemorialDay(year), 'Call 2', ''],
     ['Independence Day', new Date(year, 6, 4), 'Call 1', ''], ['Independence Day', new Date(year, 6, 4), 'Call 2', ''],
-    ['Labor Day', new Date(year, 8, 1), 'Call 1', ''], ['Labor Day', new Date(year, 8, 1), 'Call 2', ''],
-    ['Thanksgiving', new Date(year, 10, 25), 'Call 1', ''], ['Thanksgiving', new Date(year, 10, 25), 'Call 2', ''],
+    ['Labor Day', _calculateLaborDay(year), 'Call 1', ''], ['Labor Day', _calculateLaborDay(year), 'Call 2', ''],
+    ['Thanksgiving', _calculateThanksgiving(year), 'Call 1', ''], ['Thanksgiving', _calculateThanksgiving(year), 'Call 2', ''],
     ['Christmas', new Date(year, 11, 25), 'Call 1', ''], ['Christmas', new Date(year, 11, 25), 'Call 2', '']
   ];
   ss.getSheetByName('Holiday Coverage').getRange(2, 1, hData.length, 4).setValues(hData);
 
   const shData = [
-      ['Presidents\' Day', new Date(year, 1, 15), true], ['Valentine\'s Day', new Date(year, 1, 14), true],
-      ['Easter', new Date(year, 3, 4), true], ['Mother\'s Day', new Date(year, 4, 10), true], ['Father\'s Day', new Date(year, 5, 20), true]
+      ['Presidents\' Day', new Date(year, 1, 15), true], // Approx
+      ['Valentine\'s Day', new Date(year, 1, 14), true],
+      ['Easter', _calculateEaster(year), true],
+      ['Mother\'s Day', new Date(year, 4, 10), true], // Approx
+      ['Father\'s Day', new Date(year, 5, 20), true] // Approx
   ];
   ss.getSheetByName('Soft Holiday Warnings').getRange(2, 1, shData.length, 3).setValues(shData);
 
+  // Randomize Lottery Position
   const pSheet = ss.getSheetByName('Participant Config');
   const tSheet = ss.getSheetByName('Turn Management');
   const pData = pSheet.getDataRange().getValues();
+  const pH = pData[0];
   let acts = [];
   for (let i=1; i<pData.length; i++) {
-      if (pData[i][pData[0].indexOf('Active for Year')]) acts.push({ r: i+1, n: pData[i][1] });
-      else pSheet.getRange(i+1, pData[0].indexOf('LotteryPosition')+1).setValue('');
+      if (pData[i][pH.indexOf('Active for Year')] === true) {
+          acts.push({ r: i+1, n: pData[i][pH.indexOf('Name')] });
+      } else {
+          pSheet.getRange(i+1, pH.indexOf('LotteryPosition')+1).setValue('');
+      }
   }
+
+  // Fisher-Yates
   for (let i = acts.length - 1; i > 0; i--) {
       let j = Math.floor(Math.random() * (i + 1));
       [acts[i], acts[j]] = [acts[j], acts[i]];
   }
-  for (let i=0; i<acts.length; i++) pSheet.getRange(acts[i].r, pData[0].indexOf('LotteryPosition')+1).setValue(i+1);
 
-  if (tSheet.getLastRow()>1) tSheet.getRange(2, 1, tSheet.getLastRow()-1, tSheet.getLastColumn()).clearContent();
-  const tData = [];
+  for (let i=0; i<acts.length; i++) {
+      pSheet.getRange(acts[i].r, pH.indexOf('LotteryPosition')+1).setValue(i+1);
+  }
+
+  // Sync to Turn Management
+  if (tSheet.getLastRow() > 1) tSheet.getRange(2, 1, tSheet.getLastRow()-1, tSheet.getLastColumn()).clearContent();
+  const tDataToWrite = [];
   const npData = pSheet.getDataRange().getValues();
   for (let i=1; i<npData.length; i++) {
-      if (npData[i][pData[0].indexOf('Active for Year')]) {
-          tData.push([
-              npData[i][1], npData[i][2], npData[i][4], '', '', npData[i][5], false
+      if (npData[i][pH.indexOf('Active for Year')] === true) {
+          tDataToWrite.push([
+              npData[i][pH.indexOf('Name')],
+              npData[i][pH.indexOf('PIN')],
+              npData[i][pH.indexOf('SeniorityPosition')],
+              '', '',
+              npData[i][pH.indexOf('LotteryPosition')],
+              false
           ]);
       }
   }
-  if (tData.length>0) tSheet.getRange(2, 1, tData.length, 7).setValues(tData);
+  if (tDataToWrite.length > 0) tSheet.getRange(2, 1, tDataToWrite.length, 7).setValues(tDataToWrite);
 
   return { success: true, message: 'Auto-Fill complete.' };
 }
+
+// ============================================================================
+// ADMIN PHASE CONTROLLERS
+// ============================================================================
 
 function confirmSetup() {
   if (_getConfigValue('CurrentPhase', '') !== 'SETUP_REVIEW') return { success: false, message: 'Not in SETUP_REVIEW.' };
@@ -666,14 +779,11 @@ function confirmSetup() {
   return { success: true, message: 'Setup Confirmed.' };
 }
 
-// ============================================================================
-// ADMIN CONTROLS (PHASE TRANSITIONS)
-// ============================================================================
-
 function _resetQueueToLotteryPosition1() {
   const tSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Turn Management');
   const data = tSheet.getDataRange().getValues();
   const statIdx = data[0].indexOf('Status');
+  if (statIdx === -1) return;
   for (let i=1; i<data.length; i++) {
       let st = data[i][statIdx];
       if (st !== 'Pass' && st !== 'None' && st !== 'TargetReached') tSheet.getRange(i+1, statIdx+1).setValue('');
@@ -687,74 +797,30 @@ function beginSeniorityRound() {
   _setConfigValue('CurrentPhase', 'VACATION_SENIORITY');
   _setConfigValue('SelectionStarted', true);
   _resetQueueToLotteryPosition1();
-  return { success: true };
+  return { success: true, message: 'Seniority Round 1 started.' };
 }
-function beginWeekendPhase() { _setConfigValue('CurrentPhase', 'WEEKEND'); _resetQueueToLotteryPosition1(); return { success: true }; }
-function beginHolidayVolunteerPhase() { _setConfigValue('CurrentPhase', 'HOLIDAY_VOLUNTEER'); _resetQueueToLotteryPosition1(); return { success: true }; }
-function beginMandatoryHolidayPhase() { _setConfigValue('CurrentPhase', 'HOLIDAY_MANDATORY'); _resetQueueToLotteryPosition1(); return { success: true }; }
-function beginTransferRound() { _setConfigValue('CurrentPhase', 'TRANSFER_OFFER_COLLECTION'); _setConfigValue('TransferLocked', false); return { success: true }; }
+function beginWeekendPhase() { _setConfigValue('CurrentPhase', 'WEEKEND'); _resetQueueToLotteryPosition1(); return { success: true, message: 'Weekend phase started.' }; }
+function beginHolidayVolunteerPhase() { _setConfigValue('CurrentPhase', 'HOLIDAY_VOLUNTEER'); _resetQueueToLotteryPosition1(); return { success: true, message: 'Holiday Volunteer phase started.' }; }
+function beginMandatoryHolidayPhase() { _setConfigValue('CurrentPhase', 'HOLIDAY_MANDATORY'); _resetQueueToLotteryPosition1(); return { success: true, message: 'Mandatory Holiday phase started.' }; }
+function beginTransferRound() { _setConfigValue('CurrentPhase', 'TRANSFER_OFFER_COLLECTION'); _setConfigValue('TransferLocked', false); return { success: true, message: 'Transfer Offers started.' }; }
 function lockTransferOffersAndBeginReceiverSelection() {
   if (_getConfigValue('CurrentPhase', '') !== 'TRANSFER_OFFER_COLLECTION') return { success: false, message: 'Not in offer collection.' };
   _setConfigValue('CurrentPhase', 'TRANSFER_RECEIVER');
   _setConfigValue('TransferLocked', true);
   _resetQueueToLotteryPosition1();
-  return { success: true };
+  return { success: true, message: 'Transfer locked. Receiver selection started.' };
 }
-function completeTransferRound() { _setConfigValue('CurrentPhase', 'COMPLETE'); return { success: true }; }
+function completeTransferRound() { _setConfigValue('CurrentPhase', 'COMPLETE'); return { success: true, message: 'Complete.' }; }
 
-function refreshReconcileFromSheet() {
-    const lock = LockService.getScriptLock();
-    lock.waitLock(30000);
-    try {
-        const ss = SpreadsheetApp.getActiveSpreadsheet();
-        let issues = [];
-
-        const wSheet = ss.getSheetByName('Week Availability');
-        const wData = wSheet.getDataRange().getValues();
-        let vCounts = {};
-        for(let i=1; i<wData.length; i++) {
-            let arr = wData[i][5] ? String(wData[i][5]).split(',').map(n=>n.trim()) : [];
-            for (let p of arr) if (p) vCounts[p] = (vCounts[p]||0)+1;
-            wSheet.getRange(i+1, 4).setValue((parseInt(wData[i][2])||4) - arr.length);
-        }
-
-        const wkSheet = ss.getSheetByName('Weekend Coverage');
-        const wkData = wkSheet.getDataRange().getValues();
-        let wkCounts = {};
-        for(let i=1; i<wkData.length; i++) {
-            let p = wkData[i][3];
-            if (p) wkCounts[p] = (wkCounts[p]||0)+1;
-        }
-
-        const tSheet = ss.getSheetByName('Turn Management');
-        const pSheet = ss.getSheetByName('Participant Config');
-        const tData = tSheet.getDataRange().getValues();
-        const pData = pSheet.getDataRange().getValues();
-        const phase = _getConfigValue('CurrentPhase', '');
-
-        for(let i=1; i<pData.length; i++) {
-            let name = pData[i][1];
-            let rowIdx = tData.findIndex(r=>r[0]===name) + 2;
-            if (rowIdx < 2) continue;
-
-            let statCol = tData[0].indexOf('Status');
-            if (phase.startsWith('VACATION')) {
-                let tgt = pData[i][8] !== '' ? parseInt(pData[i][8]) : parseInt(getAdminOptions()['DEFAULT_VACATION_TARGET']||9);
-                if ((vCounts[name]||0) >= tgt && tData[rowIdx-2][statCol] !== 'TargetReached') tSheet.getRange(rowIdx, statCol+1).setValue('TargetReached');
-            } else if (phase === 'WEEKEND') {
-                let capStr = pData[i][10];
-                let cap = capStr !== '' ? parseInt(capStr) : 9999;
-                if ((wkCounts[name]||0) >= cap && tData[rowIdx-2][statCol] !== 'TargetReached') tSheet.getRange(rowIdx, statCol+1).setValue('TargetReached');
-            }
-        }
-
-        _advanceQueueDirectionIfComplete();
-        _setConfigValue('ReconciliationRequired', false);
-        return { success: true, issues: issues };
-    } finally {
-        lock.releaseLock();
-    }
+function adminManualSmsResend(participantName) {
+    const currentPhase = _getConfigValue('CurrentPhase', 'UNKNOWN');
+    const key = `${_getConfigValue('ActiveYear', '')}_${currentPhase}_MANUAL_${new Date().getTime()}`;
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    ss.getSheetByName('Notification Log').appendRow([new Date(), key, participantName, currentPhase, 'Manual Ping', 'PENDING', '', '', 'MANUAL', '']);
+    _processPendingNotifications([ss.getSheetByName('Notification Log').getLastRow()]);
+    return { success: true, message: 'Manual SMS dispatched.' };
 }
+
 
 // ============================================================================
 // QUEUE ENGINE
@@ -778,10 +844,12 @@ function calculateQueueWindow(turnDataRaw) {
 
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const pSheet = ss.getSheetByName('Participant Config');
-    let pData = [], pH = [];
-    if (pSheet) { pData = pSheet.getDataRange().getValues(); pH = pData[0]; }
+    if (!pSheet) return []; // Fail closed if missing config
 
-    // Calculate live targets
+    const pData = pSheet.getDataRange().getValues();
+    const pH = pData[0];
+
+    // Recalculate live targets
     let vCounts = {}, wkCounts = {};
     if (phase.startsWith('VACATION')) {
         let wData = ss.getSheetByName('Week Availability').getDataRange().getValues();
@@ -796,13 +864,15 @@ function calculateQueueWindow(turnDataRaw) {
 
     let queue = turnData.map((row, index) => {
         let name = row[headers.indexOf('Name')];
-        let pRow = pData.find(r => r[1] === name);
+        let pRow = pData.find(r => r[pH.indexOf('Name')] === name);
         let eligible = true;
         let pId = name;
 
-        if (!pRow) eligible = false;
-        else {
-            pId = pRow[0];
+        if (!pRow) {
+            eligible = false; // Fail closed if not in Participant Config
+        } else {
+            pId = pRow[pH.indexOf('ParticipantID')] || name;
+
             if (pRow[pH.indexOf('Active for Year')] !== true) eligible = false;
             else if (phase.startsWith('VACATION') && pRow[pH.indexOf('Vacation Phase Enabled')] !== true) eligible = false;
             else if (phase === 'WEEKEND' && pRow[pH.indexOf('Weekend Phase Enabled')] !== true) eligible = false;
@@ -811,8 +881,12 @@ function calculateQueueWindow(turnDataRaw) {
             else if (phase === 'TRANSFER_RECEIVER' && pRow[pH.indexOf('Transfer Receiver')] !== true) eligible = false;
             else if (phase === 'TRANSFER_OFFER_COLLECTION') eligible = false;
 
+            // Dynamic Caps Evaluation
             if (eligible && phase.startsWith('VACATION')) {
-                let t = pRow[pH.indexOf('Vacation Week Target Override')] !== '' ? parseInt(pRow[pH.indexOf('Vacation Week Target Override')]) : parseInt(getAdminOptions()['DEFAULT_VACATION_TARGET']||9);
+                let tgtStr = pRow[pH.indexOf('Vacation Week Target Override')];
+                let tgt = tgtStr !== '' ? parseInt(tgtStr) : _getGlobalVacationCap(); // Actually DEFAULT_VACATION_TARGET, wait
+                // Let's get the proper default target
+                let t = tgtStr !== '' ? parseInt(tgtStr) : parseInt(getAdminOptions()['DEFAULT_VACATION_TARGET']||9);
                 if ((vCounts[name]||0) >= t) eligible = false;
             } else if (eligible && phase === 'WEEKEND') {
                 let cStr = pRow[pH.indexOf('Weekend Assignment Maximum')];
@@ -837,6 +911,7 @@ function calculateQueueWindow(turnDataRaw) {
     else if (dir === 'ASCENDING') queue.sort((a,b)=>a.lot-b.lot);
     else queue.sort((a,b)=>b.lot-a.lot);
 
+    // Mandatory Phase 3-Tier Algorithm
     if (phase === 'HOLIDAY_MANDATORY') {
         const hData = ss.getSheetByName('Holiday Coverage').getDataRange().getValues();
         if (hData.slice(1).some(r=>r[3]==='')) {
@@ -844,7 +919,7 @@ function calculateQueueWindow(turnDataRaw) {
             let t1=[], t2=[], t3=[];
             for(let p of queue) {
                 if(!p.eligible || p.status==='Completed') continue;
-                let pr = pData.find(r=>r[1]===p.name);
+                let pr = pData.find(r=>r[pH.indexOf('Name')]===p.name);
                 let hasPrior = pr[pH.indexOf('Worked Any Official Holiday Last Year')]===true;
                 let hasCur = (hCounts[p.name]||0)>0;
                 t3.push(p);
@@ -889,98 +964,6 @@ function _advanceQueueDirectionIfComplete() {
 }
 
 // ============================================================================
-// PARTICIPANT IDENTITIES & UI DASHBOARD
-// ============================================================================
-
-function getParticipantNames() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName('Participant Config');
-  if (!sheet) return [];
-  const data = sheet.getDataRange().getValues();
-  if (data.length <= 1) return [];
-  const names = [];
-  for (let i = 1; i < data.length; i++) if (data[i][1]) names.push(data[i][1]);
-  return names;
-}
-
-function verifyUser(name, pin) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName('Participant Config');
-  if (!sheet) return { success: false };
-  const data = sheet.getDataRange().getValues();
-  const row = data.find(r => r[1] === name);
-  if (row && String(row[2]) === String(pin)) {
-      const ack = String(row[data[0].indexOf('Rules Acknowledged Year')]) === String(_getConfigValue('ActiveYear', ''));
-      return { success: true, needsAcknowledgment: !ack };
-  }
-  return { success: false, message: "Invalid PIN" };
-}
-
-function getRulesAndTips() {
-    const s = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Rules & Tips');
-    return { content: s && s.getLastRow() > 1 ? s.getDataRange().getValues()[1][0] : 'No rules' };
-}
-
-function submitRulesAcknowledgment(data) {
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const sheet = ss.getSheetByName('Participant Config');
-    const d = sheet.getDataRange().getValues();
-    for (let i=1; i<d.length; i++) {
-        if (d[i][1] === data.name) {
-            sheet.getRange(i+1, d[0].indexOf('Holiday Volunteer')+1).setValue(data.holidayVolunteer === 'Yes');
-            sheet.getRange(i+1, d[0].indexOf('Transfer Giver')+1).setValue(data.transferPreference === 'Offer' || data.transferPreference === 'Both');
-            sheet.getRange(i+1, d[0].indexOf('Transfer Receiver')+1).setValue(data.transferPreference === 'Receive' || data.transferPreference === 'Both');
-            sheet.getRange(i+1, d[0].indexOf('Rules Acknowledged Year')+1).setValue(_getConfigValue('ActiveYear', ''));
-            return { success: true };
-        }
-    }
-    return { success: false };
-}
-
-function getDashboardData(name) {
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const phase = _getConfigValue('CurrentPhase', 'SETUP_EMPTY');
-    const queue = calculateQueueWindow(ss.getSheetByName('Turn Management').getDataRange().getValues());
-    const sq = queue.map(p => ({ name: p.name, status: p.status, computedStatus: p.computedStatus }));
-
-    let el = false;
-    let u = queue.find(p=>p.name===name);
-    if (u) el = u.eligible;
-
-    let assigns = [];
-    if (name) {
-        let wd = ss.getSheetByName('Week Availability').getDataRange().getValues();
-        for(let i=1;i<wd.length;i++){ let a=String(wd[i][5]||'').split(',').map(n=>n.trim()); if(a.includes(name)) assigns.push({type:'Vacation', details:'Vacation Week', dateEpoch:new Date(wd[i][0]).getTime()}); }
-        let wkd = ss.getSheetByName('Weekend Coverage').getDataRange().getValues();
-        for(let i=1;i<wkd.length;i++){ if(wkd[i][3]===name) assigns.push({type:'Weekend', details:wkd[i][1]+' First Call', dateEpoch:new Date(wkd[i][0]).getTime()}); }
-        let hd = ss.getSheetByName('Holiday Coverage').getDataRange().getValues();
-        for(let i=1;i<hd.length;i++){ if(hd[i][3]===name) assigns.push({type:'Holiday', details:hd[i][2], dateEpoch:new Date(hd[i][1]).getTime()}); }
-    }
-
-    let wks=[], wkends=[], hols=[], trans=[];
-    let wd = ss.getSheetByName('Week Availability').getDataRange().getValues();
-    wks = wd.slice(1).filter(r=>Number(r[3])>0).map(r=>({ displayDate: new Date(r[0]).toDateString(), valueDate: new Date(r[0]).getTime(), classif: String(r[1]).trim() === 'Prime' ? 'Prime' : 'Non-Prime', spotsRemaining: Number(r[3]), specialWeek: r[4] }));
-
-    if (phase === 'WEEKEND' || phase === 'TRANSFER_RECEIVER') {
-        let wkd = ss.getSheetByName('Weekend Coverage').getDataRange().getValues();
-        wkends = wkd.slice(1).filter(r=>r[3]==='').map(r=>({ dateEpoch: new Date(r[0]).getTime(), displayDate: new Date(r[0]).toDateString(), day: r[1], partnerAssignee: 'Open' })); // simplified warnings
-    }
-    if (phase.includes('HOLIDAY') || phase === 'TRANSFER_RECEIVER') {
-        let hd = ss.getSheetByName('Holiday Coverage').getDataRange().getValues();
-        hols = hd.slice(1).filter(r=>r[3]==='').map(r=>({ name: r[0], dateEpoch: new Date(r[1]).getTime(), displayDate: new Date(r[1]).toDateString(), call: r[2] }));
-    }
-    if (phase === 'TRANSFER_RECEIVER') {
-        let td = ss.getSheetByName('Transfer Offers').getDataRange().getValues();
-        trans = td.slice(1).filter(r=>r[5]==='Open').map(r=>({ offerId: r[0], giver: r[1], type: r[2], dateEpoch: Number(r[3]), displayDate: new Date(r[3]).toDateString(), details: r[4] }));
-    }
-
-    return {
-        activeYear: _getConfigValue('ActiveYear', ''), currentPhase: phase, currentRound: _getConfigValue('CurrentRound', 1), currentDirection: _getConfigValue('CurrentDirection', 'ASCENDING'),
-        queue: sq, userAssignments: assigns, isEligible: el, weeks: wks, weekends: wkends, holidays: hols, transfers: trans
-    };
-}
-
-// ============================================================================
 // PHASE SUBMISSION ENGINE (First-Valid-Wins)
 // ============================================================================
 
@@ -996,7 +979,7 @@ function processSelection(selectionData) {
   } finally { lock.releaseLock(); }
 }
 
-function _processSelectionCore(selectionData) {
+function _processSelectionCore(data) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const phase = _getConfigValue('CurrentPhase', '');
   if (phase.startsWith('SETUP') || phase === 'COMPLETE') return { coreResult: { success: false, message: 'Selection closed.' } };
@@ -1005,11 +988,11 @@ function _processSelectionCore(selectionData) {
   const bWindow = calculateQueueWindow(turnSheet.getDataRange().getValues());
 
   let result;
-  if (phase.startsWith('VACATION')) result = _processVacation(selectionData, ss, turnSheet, bWindow);
-  else if (phase === 'WEEKEND') result = _processWeekend(selectionData, ss, turnSheet, bWindow);
-  else if (phase.includes('HOLIDAY')) result = _processHoliday(selectionData, ss, turnSheet, bWindow, phase);
-  else if (phase === 'TRANSFER_RECEIVER') result = _processTransferClaim(selectionData, ss, turnSheet, bWindow);
-  else if (phase === 'TRANSFER_OFFER_COLLECTION') result = _processTransferOffer(selectionData, ss, turnSheet);
+  if (phase.startsWith('VACATION')) result = _processVacation(data, ss, turnSheet, bWindow);
+  else if (phase === 'WEEKEND') result = _processWeekend(data, ss, turnSheet, bWindow);
+  else if (phase.includes('HOLIDAY')) result = _processHoliday(data, ss, turnSheet, bWindow, phase);
+  else if (phase === 'TRANSFER_RECEIVER') result = _processTransferClaim(data, ss, turnSheet, bWindow);
+  else if (phase === 'TRANSFER_OFFER_COLLECTION') result = _processTransferOffer(data, ss, turnSheet);
 
   let ni = [];
   if (result && result.success) {
@@ -1024,7 +1007,7 @@ function _processVacation(data, ss, turnSheet, queue) {
     if (!u || u.computedStatus !== 'Active') return { success: false, message: 'Not your turn.' };
 
     let { week1, week2 } = data;
-    if (_getConfigValue('CurrentPhase', '') === 'VACATION_SENIORITY' && week1 && week2) return { success: false, message: 'Only ONE week permitted in Seniority Round.' };
+    if (_getConfigValue('CurrentPhase', '') === 'VACATION_SENIORITY' && (week1 && week2)) return { success: false, message: 'During the Seniority Round, you may only select EXACTLY ONE week per turn.' };
     if (!week1 && !week2) return { success: false, message: 'No weeks selected.' };
     if (week1 === week2) return { success: false, message: 'Cannot select same week twice.' };
 
@@ -1036,11 +1019,12 @@ function _processVacation(data, ss, turnSheet, queue) {
         let idx = wData.findIndex(r=>new Date(r[0]).getTime() === Number(val));
         if (idx < 1) return { err: "Week not found" };
         let r = wData[idx];
-        if (Number(r[3]) <= 0) return { err: "Week full" };
-        let arr = String(r[5]||'').split(',').map(n=>n.trim());
+        let maxCap = parseInt(r[2]) || _getGlobalVacationCap();
+        let arr = String(r[5]||'').split(',').map(n=>n.trim()).filter(Boolean);
+        if (arr.length >= maxCap) return { err: "Week full" };
         if (arr.includes(data.name)) return { err: "Already hold spot" };
         if (String(r[1]).trim()==='Prime') pCount++; else npCount++;
-        return { idx: idx, cap: r[2], arr: arr };
+        return { idx: idx, cap: maxCap, arr: arr };
     };
 
     let c1, c2;
@@ -1050,9 +1034,23 @@ function _processVacation(data, ss, turnSheet, queue) {
     if (pCount > 1) return { success: false, message: 'Only ONE Prime week permitted.' };
     if (pCount === 1 && npCount > 0) return { success: false, message: 'Prime must stand alone.' };
 
+    const pSheet = ss.getSheetByName('Participant Config');
+    const pData = pSheet.getDataRange().getValues();
+    const pRow = pData.find(r=>r[1]===data.name);
+
     let total = 0; for(let i=1;i<wData.length;i++){ let a=String(wData[i][5]||'').split(',').map(n=>n.trim()); if(a.includes(data.name)) total++; }
-    let tgt = ss.getSheetByName('Participant Config').getDataRange().getValues().find(r=>r[1]===data.name)[8] || 9;
-    if (total + (w1Row?1:0) + (w2Row?1:0) > tgt) return { success: false, message: 'Exceeds target.' };
+    let tgtStr = pRow[8];
+    let tgt = tgtStr !== '' ? parseInt(tgtStr) : parseInt(getAdminOptions()['DEFAULT_VACATION_TARGET']||9);
+
+    if (total + (c1?1:0) + (c2?1:0) > tgt) return { success: false, message: 'Exceeds target.' };
+
+    const curRound = _getConfigValue('CurrentRound', 1);
+    if (curRound <= 3) {
+        if (c1 && wData[r1][4]==='Spring Break' && pRow[15]===true) return { success: false, message: 'Restricted from Spring Break until Round 4.' };
+        if (c1 && wData[r1][4]==='Christmas' && pRow[16]===true) return { success: false, message: 'Restricted from Christmas until Round 4.' };
+        if (c2 && wData[r2][4]==='Spring Break' && pRow[15]===true) return { success: false, message: 'Restricted from Spring Break until Round 4.' };
+        if (c2 && wData[r2][4]==='Christmas' && pRow[16]===true) return { success: false, message: 'Restricted from Christmas until Round 4.' };
+    }
 
     if (c1) { c1.arr.push(data.name); wSheet.getRange(r1+1, 6).setValue(c1.arr.join(', ')); wSheet.getRange(r1+1, 4).setValue(c1.cap-c1.arr.length); }
     if (c2) { c2.arr.push(data.name); wSheet.getRange(r2+1, 6).setValue(c2.arr.join(', ')); wSheet.getRange(r2+1, 4).setValue(c2.cap-c2.arr.length); }
@@ -1060,6 +1058,15 @@ function _processVacation(data, ss, turnSheet, queue) {
     let row = u.originalRowIndex;
     turnSheet.getRange(row, turnSheet.getDataRange().getValues()[0].indexOf('Status')+1).setValue('Completed');
     if (npCount === 2) turnSheet.getRange(row, turnSheet.getDataRange().getValues()[0].indexOf('SkipNextTurn')+1).setValue(true);
+
+    if (_getConfigValue('CurrentPhase', '') === 'VACATION_SENIORITY') {
+        const tData = turnSheet.getDataRange().getValues();
+        if (!calculateQueueWindow(tData).some(p => p.computedStatus === 'Waiting' || p.computedStatus === 'Active')) {
+           _setConfigValue('CurrentPhase', 'VACATION_RANDOM');
+           _setConfigValue('CurrentRound', 2);
+           _resetQueueToLotteryPosition1();
+        }
+    }
     return { success: true };
 }
 
@@ -1079,15 +1086,35 @@ function _processWeekend(data, ss, turnSheet, queue) {
     for(let i=1;i<wData.length;i++) if(new Date(wData[i][0]).getTime() === partnerEpoch && wData[i][3] === data.name) return { success: false, message: 'Cannot hold both Sat/Sun' };
 
     wSheet.getRange(tRow+1, 4).setValue(data.name);
+    let msg = 'Weekend assigned.';
+
+    if (data.optHolidayName && data.optHolidayDate && data.optHolidayCall) {
+        const hSheet = ss.getSheetByName('Holiday Coverage');
+        const hData = hSheet.getDataRange().getValues();
+        let hRow = -1, holdsOther = false;
+        for(let i=1;i<hData.length;i++) if(hData[i][0]===data.optHolidayName && new Date(hData[i][1]).getTime()===Number(data.optHolidayDate)) {
+            if(hData[i][2]===data.optHolidayCall) hRow=i; else if(hData[i][3]===data.name) holdsOther = true;
+        }
+        if (holdsOther) msg += ' However, you already hold the other call position for that holiday.';
+        else if (hRow !== -1) {
+            if (hData[hRow][3] === '') {
+                hSheet.getRange(hRow+1, 4).setValue(data.name);
+                msg += ' Holiday also assigned.';
+                ss.getSheetByName('Notification Log').appendRow([new Date(), 'HOLIDAY_OPT_'+data.name+'_'+data.optHolidayDate, data.name, _getConfigValue('CurrentRound', 1), 'Holiday Opt-in', 'PENDING', '', '', 'HOLIDAY_CONFIRM', '']);
+            } else msg += ' Holiday was taken by someone else.';
+        }
+    }
+
     turnSheet.getRange(u.originalRowIndex, turnSheet.getDataRange().getValues()[0].indexOf('Status')+1).setValue('Completed');
-    return { success: true, message: 'Weekend assigned.' };
+    return { success: true, message: msg };
 }
 
 function _processHoliday(data, ss, turnSheet, queue, phase) {
     const u = queue.find(p=>p.name===data.name);
     if (!u || u.computedStatus !== 'Active') return { success: false, message: 'Not your turn.' };
 
-    if (data.action === 'Pass' && phase === 'HOLIDAY_VOLUNTEER') {
+    if (data.action === 'Pass') {
+        if (phase === 'HOLIDAY_MANDATORY') return { success: false, message: 'Cannot pass during Mandatory.' };
         turnSheet.getRange(u.originalRowIndex, turnSheet.getDataRange().getValues()[0].indexOf('Status')+1).setValue('Pass');
         return { success: true, message: 'Passed.' };
     }
@@ -1109,34 +1136,45 @@ function _processHoliday(data, ss, turnSheet, queue, phase) {
 
 function _processTransferOffer(data, ss, turnSheet) {
     if (_getConfigValue('TransferLocked', false)) return { success: false, message: 'Locked.' };
+
+    const pSheet = ss.getSheetByName('Participant Config');
+    const pData = pSheet.getDataRange().getValues();
+    const pRow = pData.find(r=>r[1]===data.name);
+    if (!pRow || pRow[13] !== true) return { success: false, message: 'Not a giver.' };
+
     if (data.offers && data.offers.length > 0) {
         const tSheet = ss.getSheetByName('Transfer Offers');
-        const rows = data.offers.map((o,i) => ['OFFER-'+(tSheet.getLastRow()+i), data.name, o.type, o.dateEpoch, o.details, 'Open', '']);
-
-        // Ownership Validation: The reviewer states "Verify every offered assignment currently exists. Verify it is currently assigned to the giver. Reject entire submission if any item is fabricated."
+        const nextId = tSheet.getLastRow();
         const wData = ss.getSheetByName('Weekend Coverage').getDataRange().getValues();
         const hData = ss.getSheetByName('Holiday Coverage').getDataRange().getValues();
-        for (let o of data.offers) {
-            let valid = false;
-            if (o.type === 'Weekend') {
-                let day = o.details.includes('Saturday') ? 'Saturday' : 'Sunday';
-                if (wData.find(r => new Date(r[0]).getTime() === o.dateEpoch && r[1] === day && r[3] === data.name)) valid = true;
-            } else if (o.type === 'Holiday') {
-                if (hData.find(r => new Date(r[1]).getTime() === o.dateEpoch && r[2] === o.details && r[3] === data.name)) valid = true;
-            }
-            if (!valid) return { success: false, message: "You do not own assignment: " + o.details };
-        }
+        const rows = [];
 
+        for (let i=0; i<data.offers.length; i++) {
+            let o = data.offers[i];
+            let v = false;
+            if (o.type === 'Weekend') {
+                let d = o.details.includes('Saturday')?'Saturday':'Sunday';
+                if (wData.find(r=>new Date(r[0]).getTime()===o.dateEpoch && r[1]===d && r[3]===data.name)) v = true;
+            } else if (o.type === 'Holiday') {
+                if (hData.find(r=>new Date(r[1]).getTime()===o.dateEpoch && r[2]===o.details && r[3]===data.name)) v = true;
+            }
+            if (!v) return { success: false, message: 'Do not own: ' + o.details };
+            rows.push(['OFFER-'+(nextId+i), data.name, o.type, o.dateEpoch, o.details, 'Open', '']);
+        }
         tSheet.getRange(tSheet.getLastRow()+1, 1, rows.length, 7).setValues(rows);
     }
-    const u = calculateQueueWindow(turnSheet.getDataRange().getValues()).find(p=>p.name===data.name);
-    if(u) turnSheet.getRange(u.originalRowIndex, turnSheet.getDataRange().getValues()[0].indexOf('Status')+1).setValue('Pass');
-    return { success: true };
+
+    // In Offer Collection, we don't have an active queue. It's open.
+    // The participant can just submit. But we should mark their turn as Pass so they don't see it again if we want.
+    // Wait, the prompt says "Givers do not need to wait in a serpentine Active window merely to submit irrevocable offers."
+    // So we don't update queue status here.
+    return { success: true, message: 'Offers submitted.' };
 }
 
 function _processTransferClaim(data, ss, turnSheet, queue) {
     const u = queue.find(p=>p.name===data.name);
     if (!u || u.computedStatus !== 'Active') return { success: false, message: 'Not your turn.' };
+
     if (data.action === 'None') {
         turnSheet.getRange(u.originalRowIndex, turnSheet.getDataRange().getValues()[0].indexOf('Status')+1).setValue('None');
         return { success: true };
@@ -1148,28 +1186,137 @@ function _processTransferClaim(data, ss, turnSheet, queue) {
     if (!offer) return { success: false, message: 'Not found.' };
     if (offer[5] !== 'Open') return { success: false, message: 'Already taken.' };
 
-    // Receiver validation: Check ownership remains with giver
-    let t = offer[2], d = Number(offer[3]), det = offer[4], g = offer[1];
-    if (t === 'Weekend') {
+    let typ = offer[2], d = Number(offer[3]), det = offer[4], g = offer[1];
+
+    if (typ === 'Weekend') {
         const wSheet = ss.getSheetByName('Weekend Coverage');
         const wData = wSheet.getDataRange().getValues();
         let day = det.includes('Saturday') ? 'Saturday' : 'Sunday';
-        let r = wData.findIndex(r => new Date(r[0]).getTime() === d && r[1] === day);
-        if (r === -1 || wData[r][3] !== g) return { success: false, message: "Original giver no longer holds assignment." };
-        wSheet.getRange(r+1, 4).setValue(data.name);
-    } else if (t === 'Holiday') {
+        let verifyRow = wData.findIndex(r => new Date(r[0]).getTime()===d && r[1]===day);
+        if (verifyRow===-1 || wData[verifyRow][3] !== g) return { success: false, message: 'Original giver no longer holds assignment.' };
+
+        let partnerEpoch = day === 'Saturday' ? d+86400000 : d-86400000;
+        if (wData.find(r=>new Date(r[0]).getTime()===partnerEpoch && r[3]===data.name)) return { success: false, message: 'Cannot hold both Sat/Sun' };
+        wSheet.getRange(verifyRow+1, 4).setValue(data.name);
+    } else if (typ === 'Holiday') {
         const hSheet = ss.getSheetByName('Holiday Coverage');
         const hData = hSheet.getDataRange().getValues();
-        let r = hData.findIndex(r => new Date(r[1]).getTime() === d && r[2] === det);
-        if (r === -1 || hData[r][3] !== g) return { success: false, message: "Original giver no longer holds assignment." };
-        hSheet.getRange(r+1, 4).setValue(data.name);
+        let verifyRow = hData.findIndex(r => new Date(r[1]).getTime()===d && r[2]===det);
+        if (verifyRow===-1 || hData[verifyRow][3] !== g) return { success: false, message: 'Original giver no longer holds assignment.' };
+        if (hData.find(r=>new Date(r[1]).getTime()===d && r[2]!==det && r[3]===data.name)) return { success: false, message: 'Cannot hold both calls' };
+        hSheet.getRange(verifyRow+1, 4).setValue(data.name);
     }
 
     tSheet.getRange(tData.indexOf(offer)+1, 6).setValue('Accepted');
     tSheet.getRange(tData.indexOf(offer)+1, 7).setValue(data.name);
+    ss.getSheetByName('Transfer History').appendRow([ new Date(), _getConfigValue('ActiveYear', ''), typ, new Date(d), det, g, data.name ]);
+
     turnSheet.getRange(u.originalRowIndex, turnSheet.getDataRange().getValues()[0].indexOf('Status')+1).setValue('Completed');
     return { success: true };
 }
+
+
+// ============================================================================
+// RECONCILIATION
+// ============================================================================
+
+function refreshReconcileFromSheet() {
+    const lock = LockService.getScriptLock();
+    lock.waitLock(30000);
+    try {
+        const ss = SpreadsheetApp.getActiveSpreadsheet();
+        let issues = [];
+
+        const wSheet = ss.getSheetByName('Week Availability');
+        const wData = wSheet.getDataRange().getValues();
+        let vCounts = {};
+        for(let i=1; i<wData.length; i++) {
+            let arr = wData[i][5] ? String(wData[i][5]).split(',').map(n=>n.trim()).filter(Boolean) : [];
+            for (let p of arr) vCounts[p] = (vCounts[p]||0)+1;
+            let cap = parseInt(wData[i][2]) || _getGlobalVacationCap();
+            wSheet.getRange(i+1, 4).setValue(cap - arr.length);
+            if (arr.length > cap) issues.push("Over-capacity week: " + new Date(wData[i][0]).toDateString());
+        }
+
+        const wkSheet = ss.getSheetByName('Weekend Coverage');
+        const wkData = wkSheet.getDataRange().getValues();
+        let wkCounts = {};
+        for(let i=1; i<wkData.length; i++) {
+            let p = wkData[i][3];
+            if (p) wkCounts[p] = (wkCounts[p]||0)+1;
+
+            let dTime = new Date(wkData[i][0]).getTime();
+            let day = wkData[i][1];
+            let partnerEpoch = day === 'Saturday' ? dTime + 86400000 : dTime - 86400000;
+            if (p) {
+                if (wkData.find(r => new Date(r[0]).getTime()===partnerEpoch && r[3]===p)) {
+                    issues.push("Duplicate weekend position for " + p + " on " + new Date(dTime).toDateString());
+                }
+            }
+        }
+
+        const hSheet = ss.getSheetByName('Holiday Coverage');
+        const hData = hSheet.getDataRange().getValues();
+        for(let i=1; i<hData.length; i++) {
+            let p = hData[i][3];
+            let hd = new Date(hData[i][1]).getTime();
+            let call = hData[i][2];
+            if (p) {
+                 if (hData.find(r => new Date(r[1]).getTime()===hd && r[2]!==call && r[3]===p)) {
+                     issues.push("Prohibited same-holiday combination for " + p + " on " + hData[i][0]);
+                 }
+            }
+        }
+
+        const tSheet = ss.getSheetByName('Turn Management');
+        const pSheet = ss.getSheetByName('Participant Config');
+        const tData = tSheet.getDataRange().getValues();
+        const pData = pSheet.getDataRange().getValues();
+        const phase = _getConfigValue('CurrentPhase', '');
+        const statCol = tData[0].indexOf('Status');
+
+        for(let i=1; i<pData.length; i++) {
+            let name = pData[i][1];
+            let rowIdx = tData.findIndex(r=>r[0]===name) + 2;
+            if (rowIdx < 2) continue; // Unknown in Turn Mgmt? Wait, what if someone is missing? "Unknown participant names".
+
+            if (phase.startsWith('VACATION')) {
+                let tgtStr = pData[i][8];
+                let tgt = tgtStr !== '' ? parseInt(tgtStr) : parseInt(getAdminOptions()['DEFAULT_VACATION_TARGET']||9);
+                if ((vCounts[name]||0) >= tgt) {
+                    if (tData[rowIdx-2][statCol] !== 'TargetReached') tSheet.getRange(rowIdx, statCol+1).setValue('TargetReached');
+                } else if ((vCounts[name]||0) > tgt) {
+                    issues.push("Target exceeded for " + name);
+                }
+            } else if (phase === 'WEEKEND') {
+                let capStr = pData[i][10];
+                if (capStr !== '') {
+                    let cap = parseInt(capStr);
+                    if ((wkCounts[name]||0) >= cap) {
+                        if (tData[rowIdx-2][statCol] !== 'TargetReached') tSheet.getRange(rowIdx, statCol+1).setValue('TargetReached');
+                    } else if ((wkCounts[name]||0) > cap) {
+                        issues.push("Weekend cap exceeded for " + name);
+                    }
+                }
+            }
+        }
+
+        // Also check if any names in assignments don't exist in pData
+        for (let name of Object.keys(vCounts)) {
+            if (!pData.find(r=>r[1]===name)) issues.push("Unknown participant in vacations: " + name);
+        }
+        for (let name of Object.keys(wkCounts)) {
+            if (!pData.find(r=>r[1]===name)) issues.push("Unknown participant in weekends: " + name);
+        }
+
+        _advanceQueueDirectionIfComplete();
+        _setConfigValue('ReconciliationRequired', false);
+        return { success: true, issues: issues, message: issues.length > 0 ? 'Reconciled with issues: ' + issues.join(', ') : 'Reconciled successfully.' };
+    } finally {
+        lock.releaseLock();
+    }
+}
+
 
 // ============================================================================
 // SMS NOTIFICATIONS & TIMERS
@@ -1185,19 +1332,43 @@ function _queueNotifications(beforeWindow) {
     const lSheet = ss.getSheetByName('Notification Log');
     if (!lSheet) return [];
 
-    const afterWindow = calculateQueueWindow(ss.getSheetByName('Turn Management').getDataRange().getValues());
+    const turnSheet = ss.getSheetByName('Turn Management');
+    const afterWindow = calculateQueueWindow(turnSheet.getDataRange().getValues());
     const lData = lSheet.getDataRange().getValues();
+
     const exist = new Set();
-    for (let i=1; i<lData.length; i++) if (lData[i][8]==='INITIAL') exist.add(String(lData[i][1]));
+    for (let i=1; i<lData.length; i++) {
+        if (lData[i][8]==='INITIAL') exist.add(String(lData[i][1]));
+    }
 
     const newIndices = [];
+    let turnIdSuffix = new Date().getTime(); // ensure uniqueness if multiple are added this exact pass
     for (let p of afterWindow) {
         if (p.computedStatus === 'Active') {
-            let k = _buildDedupeKey(p.pId);
-            if (!exist.has(k)) {
-                lSheet.appendRow([new Date(), k, p.name, _getConfigValue('CurrentPhase', '') + ' R' + _getConfigValue('CurrentRound', 1), 'Active', 'PENDING', '', '', 'INITIAL', '']);
+            let k = _buildDedupeKey(p.pId, turnIdSuffix++);
+            // But wait, the dedupe key should be stable for the same turn!
+            // If they are in the active window, and we haven't seen them for this phase/direction cycle, they get ONE initial.
+            // If they drop out and come back in (e.g., a later phase cycle), they need a new key?
+            // "Legitimate later reentry produces a new activation"
+            // Using Phase and Direction implicitly handles the normal serpentine cycles.
+            // If they enter multiple times in the SAME direction (e.g. transfers), we need turnId.
+            // Actually, we can check if they were NOT active in the beforeWindow.
+            let wasActive = false;
+            for (let bp of beforeWindow) {
+                if (bp.name === p.name && bp.computedStatus === 'Active') wasActive = true;
+            }
+
+            // Re-evaluating the stable key: If they were not active, we issue a new key using the timestamp to ensure it doesn't collide with past turns in this direction.
+            // But wait, if we use a timestamp, the key changes every time and we can't find it to suppress duplicates?
+            // "A participant who leaves and later legitimately reenters must receive a new immediate SMS"
+            // So if they are in 'after' but not in 'before', they get a NEW entry.
+            // If they were already in 'before', they keep their existing entry (we don't write a new one).
+
+            if (!wasActive) {
+                // They just entered. Give them a key.
+                let entryKey = _buildDedupeKey(p.pId, new Date().getTime() + Math.floor(Math.random()*1000));
+                lSheet.appendRow([new Date(), entryKey, p.name, _getConfigValue('CurrentPhase', '') + ' R' + _getConfigValue('CurrentRound', 1), 'Active', 'PENDING', '', '', 'INITIAL', entryKey]);
                 newIndices.push(lSheet.getLastRow());
-                exist.add(k);
             }
         }
     }
@@ -1210,885 +1381,170 @@ function _processPendingNotifications(indices) {
     const lSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Notification Log');
     const pData = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Participant Config').getDataRange().getValues();
 
+    // We do NOT use LockService here. We assume Lock is released.
     for (let row of indices) {
         lSheet.getRange(row, 6).setValue('PROCESSING');
-        let rData = lSheet.getRange(row, 1, 1, 9).getValues()[0];
+        let rData = lSheet.getRange(row, 1, 1, 10).getValues()[0];
         let pRow = pData.find(r=>r[1]===rData[2]);
-        let phone = pRow ? pRow[3] : null;
-        if (rData[8]==='ADMIN_ALERT') phone = getAdminPhoneNumber();
-        if (!phone) { lSheet.getRange(row, 6).setValue('SKIPPED'); continue; }
+        let phone = pRow ? String(pRow[3] || '').trim() : null;
+        let type = rData[8];
 
-        // Mocked dispatch
-        lSheet.getRange(row, 6).setValue('SENT');
-    }
-}
-function getParticipantNames() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName('Turn Management');
-  const names = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getValues();
-  return names.flat();
-}
-function verifyUser(name, pin) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName('Turn Management');
-  const data = sheet.getDataRange().getValues();
-  const userRow = data.find(row => row[0] === name);
-  if (userRow) {
-    if (String(userRow[1]) === String(pin)) { return "Success"; }
-  }
-  return "Invalid PIN";
-}
-function calculateQueueWindow(turnDataRaw, currentRound) {
-    const turnData = [...turnDataRaw];
-    const turnHeaders = turnData.shift();
+        if (type==='ADMIN_ALERT') phone = getAdminPhoneNumber();
+        if (!phone) { lSheet.getRange(row, 6).setValue('SKIPPED_NO_PHONE'); continue; }
 
-    const nameIdx = turnHeaders.indexOf('Name');
-    const statusIdx = turnHeaders.indexOf('Status');
-    const senPosIdx = turnHeaders.indexOf('SeniorityPosition');
-    const lotPosIdx = turnHeaders.indexOf('LotteryPosition');
-    const skipIdx = turnHeaders.indexOf('SkipNextTurn');
+        const configCheck = checkSmsConfiguration();
+        if (!configCheck.valid) { lSheet.getRange(row, 6).setValue('FAILED'); lSheet.getRange(row, 8).setValue(configCheck.message); continue; }
 
-    // Create an array of objects to sort easily
-    let queue = turnData.map((row, index) => ({
-        originalIndex: index + 1, // +1 because we shifted headers, and another +1 for 1-based indexing in sheets if needed, but we'll use original row data
-        name: row[nameIdx],
-        status: row[statusIdx],
-        skipNextTurn: row[skipIdx],
-        seniorityPosition: row[senPosIdx],
-        lotteryPosition: row[lotPosIdx],
-        queuePosition: currentRound === 1 ? row[senPosIdx] : row[lotPosIdx],
-        computedStatus: 'Waiting'
-    }));
+        let msg = '';
+        if (type === 'HOLIDAY_CONFIRM') msg = `Vacation Selector: You have successfully secured the nearby holiday position you requested.`;
+        else if (type === 'ADMIN_ALERT') msg = `ADMIN ALERT: Participant ${rData[2]} has been unresponsive in the Active window (${rData[3]}) for the configured threshold limit.`;
+        else if (type === 'REMINDER') msg = `Vacation Selector Reminder: You are STILL in the Active window for ${rData[3]}. Please make your selection ASAP: ${props['VACATION_SELECTOR_URL']}`;
+        else msg = `Vacation Selector: It is your turn! You are in the Active window for ${rData[3]}. Make your selection here: ${props['VACATION_SELECTOR_URL']}`;
 
-    // Sort queue based on current round rules
-    if (currentRound === 1) {
-        queue.sort((a, b) => a.seniorityPosition - b.seniorityPosition);
-    } else {
-        const isEvenRound = currentRound % 2 === 0;
-        if (isEvenRound) {
-            queue.sort((a, b) => a.lotteryPosition - b.lotteryPosition);
+        const result = sendSmsViaTwilio(phone, msg);
+        if (result.success) {
+            lSheet.getRange(row, 6).setValue('SENT');
+            lSheet.getRange(row, 7).setValue(result.messageSid || 'mock');
         } else {
-            queue.sort((a, b) => b.lotteryPosition - a.lotteryPosition);
+            lSheet.getRange(row, 6).setValue('FAILED');
+            lSheet.getRange(row, 8).setValue(result.error);
         }
     }
+}
 
-    // Find the anchor: the first person who is not 'Completed' and not 'skipped' (if we were consuming skips)
-    // Wait, the requirement says: "Do not consume SkipNextTurn in read-only getter functions. Consume skips only under the script lock during state transitions."
-    // And "A completed or skipped interior position leaves a hole; it must not pull a fourth person into the window while the earliest unfinished person remains."
+function _processScheduledTimers() {
+    if (String(_smsDependencies.getProperties()['SMS_NOTIFICATIONS_ENABLED']) !== 'true') return;
 
-    let anchorIndex = queue.findIndex(person => person.status !== 'Completed');
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const lSheet = ss.getSheetByName('Notification Log');
+    if (!lSheet) return;
 
-    if (anchorIndex !== -1) {
-        const windowSlots = ['Active', 'Standby', 'Backup'];
-        // The permitted window consists of that queue position and the next two queue positions only.
-        for (let offset = 0; offset < 3; offset++) {
-            const personIndex = anchorIndex + offset;
-            if (personIndex < queue.length) {
-                let person = queue[personIndex];
-                if (person.status !== 'Completed' && person.skipNextTurn !== true) {
-                    person.computedStatus = windowSlots[offset];
-                } else if (person.skipNextTurn === true && person.status !== 'Completed') {
-                    // If they are skipping, they leave a hole.
-                    person.computedStatus = 'Waiting';
-                } else if (person.status === 'Completed') {
-                     // If they are completed but inside the window (can happen if someone completes out of order), they leave a hole
-                    person.computedStatus = 'Completed';
+    const currentPhase = _getConfigValue('CurrentPhase', 'UNKNOWN');
+    if (currentPhase === 'SETUP_EMPTY' || currentPhase === 'COMPLETE') return;
+
+    const adminOpts = getAdminOptions();
+    const reminderMs = parseInt(adminOpts['REMINDER_DELAY_MINUTES'] || 360) * 60 * 1000;
+    const alertMs = parseInt(adminOpts['ADMIN_ALERT_DELAY_MINUTES'] || 720) * 60 * 1000;
+    const now = new Date().getTime();
+
+    const lData = lSheet.getDataRange().getValues();
+    const tsIdx = 0, keyIdx = 1, nameIdx = 2, rdIdx = 3, statIdx = 5, typeIdx = 8, actIdIdx = 9;
+
+    const turnSheet = ss.getSheetByName('Turn Management');
+    const queue = calculateQueueWindow(turnSheet.getDataRange().getValues());
+    const activeNames = new Set(queue.filter(p => p.computedStatus === 'Active').map(p => p.name));
+
+    const sentRems = new Set(), sentAlts = new Set();
+    for (let i=1; i<lData.length; i++) {
+        let t = lData[i][typeIdx], st = lData[i][statIdx], k = lData[i][actIdIdx];
+        if (t==='REMINDER' && (st==='SENT'||st==='PROCESSING'||st==='PENDING')) sentRems.add(k);
+        if (t==='ADMIN_ALERT' && (st==='SENT'||st==='PROCESSING'||st==='PENDING')) sentAlts.add(k);
+    }
+
+    let pend = [];
+    for (let i=1; i<lData.length; i++) {
+        if (lData[i][typeIdx]==='INITIAL' && lData[i][statIdx]==='SENT') {
+            let actId = lData[i][actIdIdx], name = lData[i][nameIdx], ts = new Date(lData[i][tsIdx]).getTime();
+
+            // To be eligible for a reminder, they must still be Active.
+            // If they are no longer active, the timer is suppressed.
+            if (activeNames.has(name)) {
+                let diff = now - ts;
+                if (diff >= reminderMs && !sentRems.has(actId)) {
+                    lSheet.appendRow([new Date(), 'REM_'+actId, name, lData[i][rdIdx], 'Reminder', 'PENDING', '', '', 'REMINDER', actId]);
+                    pend.push(lSheet.getLastRow());
+                    sentRems.add(actId);
+                }
+                if (diff >= alertMs && !sentAlts.has(actId)) {
+                    lSheet.appendRow([new Date(), 'ALT_'+actId, name, lData[i][rdIdx], 'Admin Alert', 'PENDING', '', '', 'ADMIN_ALERT', actId]);
+                    pend.push(lSheet.getLastRow());
+                    sentAlts.add(actId);
                 }
             }
         }
-    } else {
-        // Everyone is completed
-        queue.forEach(p => p.computedStatus = 'Completed');
     }
-
-    // Sort back to original order or keep sorted order for return. We'll return sorted queue.
-    return queue;
+    if (pend.length > 0) _processPendingNotifications(pend);
 }
 
-function getDashboardData(name) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const turnSheet = ss.getSheetByName('Turn Management');
-  const weekSheet = ss.getSheetByName('Week Availability');
-  const configSheet = ss.getSheetByName('Config');
-  const turnDataRaw = turnSheet.getDataRange().getValues();
-  const weekData = weekSheet.getDataRange().getValues();
-  const currentRound = configSheet.getRange("B2").getValue();
-
-  // Find user details in Turn Management
-  const turnHeaders = turnDataRaw[0];
-  const nameIdx = turnHeaders.indexOf('Name');
-  const weeksSelectedIdx = turnHeaders.indexOf('WeeksSelected');
-  const skipNextTurnIdx = turnHeaders.indexOf('SkipNextTurn');
-
-  let weeksSelected = 0;
-  let skipNextTurn = false;
-
-  if (nameIdx !== -1) {
-    const userRow = turnDataRaw.slice(1).find(row => row[nameIdx] === name);
-    if (userRow) {
-      if (weeksSelectedIdx !== -1) weeksSelected = Number(userRow[weeksSelectedIdx]) || 0;
-      if (skipNextTurnIdx !== -1) skipNextTurn = Boolean(userRow[skipNextTurnIdx]);
-    }
-  }
-
-  // Derive selectedWeeks from Week Availability sheet
-  const weekHeaders = weekData[0];
-  const selectedWeeks = [];
-
-  // Person 1-4 columns are at indexes 2, 3, 4, 5
-  weekData.slice(1).forEach(row => {
-    let hasSelected = false;
-    for (let i = 2; i <= 5; i++) {
-      if (row[i] === name) {
-        hasSelected = true;
-        break;
-      }
-    }
-
-    if (hasSelected) {
-      selectedWeeks.push({
-        valueDate: row[0] instanceof Date ? row[0].getTime() : null,
-        displayDate: row[0] instanceof Date ? row[0].toLocaleDateString("en-US", { timeZone: "UTC", month: 'short', day: 'numeric' }) : String(row[0]),
-        classification: normalizeClassification(row[1]) || row[1]
-      });
-    }
-  });
-
-  // Sort chronologically
-  selectedWeeks.sort((a, b) => {
-    if (a.valueDate && b.valueDate) return a.valueDate - b.valueDate;
-    return 0;
-  });
-
-  weekData.shift();
-
-  const queueWindow = calculateQueueWindow(turnDataRaw, currentRound);
-
-  const userObj = queueWindow.find(p => p.name === name);
-  const currentUser = {
-    name: userObj ? userObj.name : name,
-    queuePosition: userObj ? userObj.queuePosition : null,
-    status: userObj ? userObj.computedStatus : 'Unknown',
-    weeksSelected: weeksSelected,
-    skipNextTurn: skipNextTurn,
-    selectedWeeks: selectedWeeks
-  };
-
-  const turnQueue = queueWindow.map(p => ({
-      name: p.name,
-      queuePosition: p.queuePosition,
-      status: p.computedStatus
-  }));
-
-  const availableWeeks = buildAvailableWeekData(weekData);
-
-  return {
-    currentUser: currentUser,
-    turnQueue: turnQueue,
-    availableWeeks: availableWeeks,
-    currentRound: currentRound
-  };
-}
-function getPublicCalendarData() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const weekSheet = ss.getSheetByName('Week Availability');
-  const turnSheet = ss.getSheetByName('Turn Management');
-  const configSheet = ss.getSheetByName('Config');
-  const currentRound = configSheet.getRange("B2").getValue();
-  const weekData = weekSheet.getDataRange().getValues();
-  const turnDataRaw = turnSheet.getDataRange().getValues();
-  weekData.shift();
-
-  const calendarData = weekData.map(row => ({
-    startDate: row[0] instanceof Date ? row[0].toLocaleDateString("en-US", { timeZone: "UTC", month: 'short', day: 'numeric' }) : String(row[0]),
-    classification: normalizeClassification(row[1]) || row[1], // fallback for calendar display
-    person1: row[2], person2: row[3], person3: row[4], person4: row[5],
-    spotsRemaining: row[6]
-  }));
-
-  const queueWindow = calculateQueueWindow(turnDataRaw, currentRound);
-
-  const turnQueue = queueWindow.map(p => ({
-    name: p.name,
-    queuePosition: p.queuePosition,
-    status: p.computedStatus
-  }));
-
-  return {
-      calendarData: calendarData,
-      turnQueue: turnQueue,
-      currentRound: currentRound
-  };
-}
-function setupSpreadsheetSchema() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const turnSheet = ss.getSheetByName('Turn Management');
-  if (!turnSheet) return "Turn Management sheet not found.";
-
-  const headersRange = turnSheet.getRange(1, 1, 1, turnSheet.getLastColumn());
-  let headers = headersRange.getValues()[0];
-
-  let modifications = false;
-
-  // 1. Rename QueuePosition to SeniorityPosition
-  let qIndex = headers.indexOf('QueuePosition');
-  if (qIndex !== -1) {
-    turnSheet.getRange(1, qIndex + 1).setValue('SeniorityPosition');
-    headers[qIndex] = 'SeniorityPosition';
-    modifications = true;
-  }
-
-  // 2. Add LotteryPosition if missing
-  if (headers.indexOf('LotteryPosition') === -1) {
-    let newCol = headers.length + 1;
-    turnSheet.getRange(1, newCol).setValue('LotteryPosition');
-    headers.push('LotteryPosition');
-    modifications = true;
-  }
-
-  // 3. Add SkipNextTurn if missing
-  if (headers.indexOf('SkipNextTurn') === -1) {
-    let newCol = headers.length + 1;
-    turnSheet.getRange(1, newCol).setValue('SkipNextTurn');
-
-    // Initialize to false
-    if (turnSheet.getLastRow() > 1) {
-      turnSheet.getRange(2, newCol, turnSheet.getLastRow() - 1, 1).setValue(false);
-    }
-    headers.push('SkipNextTurn');
-    modifications = true;
-  }
-
-  // 4. Add PhoneNumber if missing
-  if (headers.indexOf('PhoneNumber') === -1) {
-    let newCol = headers.length + 1;
-    turnSheet.getRange(1, newCol).setValue('PhoneNumber');
-    headers.push('PhoneNumber');
-    modifications = true;
-  }
-
-  // 5. Setup Notification Log sheet
-  let logSheet = ss.getSheetByName('Notification Log');
-  let logModifications = false;
-  if (!logSheet) {
-    logSheet = ss.insertSheet('Notification Log');
-    logModifications = true;
-  }
-
-  const logHeaders = ['Timestamp', 'DedupeKey', 'ParticipantName', 'Round', 'CalculatedRole', 'Status', 'TwilioMessageSid', 'Error'];
-  let currentLogHeaders = [];
-  if (logSheet.getLastColumn() > 0) {
-     currentLogHeaders = logSheet.getRange(1, 1, 1, logSheet.getLastColumn()).getValues()[0];
-  }
-
-  for (let i = 0; i < logHeaders.length; i++) {
-     if (currentLogHeaders.indexOf(logHeaders[i]) === -1) {
-        logSheet.getRange(1, logSheet.getLastColumn() + 1 || 1).setValue(logHeaders[i]);
-        currentLogHeaders.push(logHeaders[i]);
-        logModifications = true;
-     }
-  }
-
-  if (logModifications) {
-      logSheet.setFrozenRows(1);
-      logSheet.getRange(1, 1, 1, logSheet.getLastColumn()).setFontWeight('bold').setBackground('#f3f4f6');
-  }
-
-  return (modifications || logModifications) ? "Schema updated successfully." : "Schema already up to date.";
-}
-
-function validateSchema(turnData, currentRound) {
-    const headers = turnData[0];
-    const required = ['Name', 'PIN', 'SeniorityPosition', 'Status', 'WeeksSelected', 'LotteryPosition', 'SkipNextTurn'];
-    for (let req of required) {
-        if (headers.indexOf(req) === -1) {
-            return { valid: false, message: "Missing required column: " + req + ". Please run setupSpreadsheetSchema()." };
-        }
-    }
+function checkSmsConfiguration() {
+    const props = _smsDependencies.getProperties();
+    if (!props['TWILIO_ACCOUNT_SID']) return { valid: false, message: 'Missing Twilio SID' };
+    if (!props['TWILIO_AUTH_TOKEN']) return { valid: false, message: 'Missing Twilio Auth Token' };
+    if (!props['TWILIO_FROM_NUMBER']) return { valid: false, message: 'Missing Twilio From Number' };
     return { valid: true };
 }
 
-function checkLotteryReady(turnData) {
-    const headers = turnData[0];
-    const lotIdx = headers.indexOf('LotteryPosition');
-    if (lotIdx === -1) return false;
-    let usedPositions = new Set();
-    for (let i = 1; i < turnData.length; i++) {
-        let val = turnData[i][lotIdx];
-        if (val === "" || val === null || val === undefined) return false;
-        if (usedPositions.has(val)) return false;
-        usedPositions.add(val);
-    }
-    return true;
-}
-
-function initializeLotteryRound() {
-    setupSpreadsheetSchema();
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const turnSheet = ss.getSheetByName('Turn Management');
-    const configSheet = ss.getSheetByName('Config');
-
-    const currentRound = configSheet.getRange("B2").getValue();
-    if (currentRound !== 1) {
-        return "Not in Round 1. No action taken.";
-    }
-
-    const turnDataRaw = turnSheet.getDataRange().getValues();
-    const result = _transitionToRound2(turnSheet, configSheet, turnDataRaw);
-    return result.message;
-}
-
-
-function processSelection(selectionData) {
-  const lock = LockService.getScriptLock();
-  lock.waitLock(30000);
-  let pendingRowIndices = [];
-  let finalResult = null;
-  try {
-    const res = _processSelectionCore(selectionData);
-    finalResult = res.coreResult;
-    pendingRowIndices = res.createdRowIndices || [];
-  } finally {
-    lock.releaseLock();
-  }
-
-  if (pendingRowIndices && pendingRowIndices.length > 0) {
-    try {
-      _processPendingNotifications(pendingRowIndices);
-    } catch (e) {
-      console.error("SMS notification processing failed, but selection succeeded: " + e.message);
-    }
-  }
-
-  return finalResult;
-}
-
-function _processSelectionCore(selectionData) {
-  // Inner lock removed, managed by wrapper
-  try {
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const turnSheet = ss.getSheetByName('Turn Management');
-    const weekSheet = ss.getSheetByName('Week Availability');
-    const configSheet = ss.getSheetByName('Config');
-
-    // Capture before state outside of the inner closure
-    const beforeRound = configSheet.getRange("B2").getValue();
-    const beforeWindowRaw = turnSheet.getDataRange().getValues();
-    const beforeWindow = calculateQueueWindow(beforeWindowRaw, beforeRound);
-
-    let coreResult = null;
-    const executeLogic = () => {
-    let turnDataRaw = turnSheet.getDataRange().getValues();
-    const currentRound = beforeRound;
-
-    // Check if selection is started
-    if (!isSelectionStarted()) {
-        return { success: false, message: "The vacation selection process has not started yet." };
-    }
-
-    // Schema validation
-    const schemaCheck = validateSchema(turnDataRaw, currentRound);
-    if (!schemaCheck.valid) { return { success: false, message: "System setup error: " + schemaCheck.message }; }
-
-    // Check if system is completely full
-    const weekDataRaw = weekSheet.getDataRange().getValues();
-    const weekData = weekDataRaw.slice(1);
-    let totalSpotsRemaining = 0;
-    weekData.forEach(row => {
-        let empty = 0;
-        for(let i=2; i<=5; i++) { if (!row[i]) empty++; }
-        totalSpotsRemaining += empty;
-    });
-    if (totalSpotsRemaining === 0) {
-        return { success: false, message: "Selection Complete: All available vacation slots are filled." };
-    }
-
-    const turnHeaders = turnDataRaw[0];
-    const turnData = turnDataRaw.slice(1);
-
-    const nameIdx = turnHeaders.indexOf('Name');
-    const statusIdx = turnHeaders.indexOf('Status');
-    const weeksSelectedIdx = turnHeaders.indexOf('WeeksSelected');
-    const senPosIdx = turnHeaders.indexOf('SeniorityPosition');
-    const lotPosIdx = turnHeaders.indexOf('LotteryPosition');
-    const skipIdx = turnHeaders.indexOf('SkipNextTurn');
-
-    const queueWindow = calculateQueueWindow(turnDataRaw, currentRound);
-    const userObj = queueWindow.find(p => p.name === selectionData.name);
-
-    if (!userObj) { return { success: false, message: "User not found." }; }
-
-    if (!['Active', 'Standby', 'Backup'].includes(userObj.computedStatus)) {
-        return { success: false, message: "It is not your turn to make a selection." };
-    }
-
-    // We also need the userRowIndex in the original turnData array
-    const userRowIndex = turnData.findIndex(row => row[nameIdx] === selectionData.name);
-
-    if (!selectionData.week1) {
-        return { success: false, message: "Missing primary week selection." };
-    }
-
-    if (currentRound === 1 && selectionData.week2) {
-        return { success: false, message: "Invalid selection. You can only select exactly ONE week during Round 1." };
-    }
-
-    if (selectionData.week1 === selectionData.week2) {
-        return { success: false, message: "You cannot select the same week twice in one submission." };
-    }
-
-    let w1Index = weekData.findIndex(row => row[0].getTime() == selectionData.week1);
-    let w2Index = selectionData.week2 ? weekData.findIndex(row => row[0].getTime() == selectionData.week2) : -1;
-
-    if (w1Index === -1 || (selectionData.week2 && w2Index === -1)) {
-        return { success: false, message: "One of the selected weeks does not exist." };
-    }
-
-    let w1Data = weekData[w1Index];
-    let w2Data = selectionData.week2 ? weekData[w2Index] : null;
-
-    // Validate classifications tightly on the backend before making any writes
-    const class1 = normalizeClassification(w1Data[1]);
-    const class2 = w2Data ? normalizeClassification(w2Data[1]) : null;
-
-    if (!class1 || (w2Data && !class2)) {
-        return { success: false, message: "Selected week has an invalid classification." };
-    }
-
-    if (w2Data && (class1 !== "Non-Prime" || class2 !== "Non-Prime")) {
-        return { success: false, message: "Two-week selections must both be Non-Prime." };
-    }
-
-    // Check max capacity and existing spots
-    let w1EmptySlots = 0;
-    for (let i=2; i<=5; i++) { if (!w1Data[i]) w1EmptySlots++; }
-    if (w1EmptySlots === 0) return { success: false, message: "Primary week is full." };
-
-    if (w2Data) {
-        let w2EmptySlots = 0;
-        for (let i=2; i<=5; i++) { if (!w2Data[i]) w2EmptySlots++; }
-        if (w2EmptySlots === 0) return { success: false, message: "Secondary week is full." };
-    }
-
-    // Check double booking in the same week
-    for(let i=2; i<=5; i++){
-        if (w1Data[i] === selectionData.name) return { success: false, message: "You are already booked for the primary week." };
-        if (w2Data && w2Data[i] === selectionData.name) return { success: false, message: "You are already booked for the secondary week." };
-    }
-
-    // If validation passes, apply changes atomically.
-    let w1TargetCol = -1;
-    for(let i=2; i<=5; i++){
-        if(!weekSheet.getRange(w1Index + 2, i + 1).getValue()) {
-            w1TargetCol = i + 1;
-            break;
-        }
-    }
-    if (w1TargetCol === -1) throw new Error("Concurrency error: primary week filled up.");
-
-    let w2TargetCol = -1;
-    if (selectionData.week2) {
-        for(let i=2; i<=5; i++){
-            if(!weekSheet.getRange(w2Index + 2, i + 1).getValue()) {
-                w2TargetCol = i + 1;
-                break;
-            }
-        }
-        if (w2TargetCol === -1) throw new Error("Concurrency error: secondary week filled up.");
-    }
-
-    // Perform writes
-    weekSheet.getRange(w1Index + 2, w1TargetCol).setValue(selectionData.name);
-    weekSheet.getRange(w1Index + 2, 7).setValue(w1EmptySlots - 1);
-    totalSpotsRemaining -= 1;
-
-    if (selectionData.week2) {
-        weekSheet.getRange(w2Index + 2, w2TargetCol).setValue(selectionData.name);
-        let currentSpots = (w2Data ? (4 - (w2Data.filter((_, idx) => idx >= 2 && idx <= 5 && w2Data[idx]).length)) : 0);
-        let newW2Spots = Math.max(0, currentSpots - 1);
-        weekSheet.getRange(w2Index + 2, 7).setValue(newW2Spots);
-        totalSpotsRemaining -= 1;
-    }
-
-    // Update Turn Sheet for current user
-    const weeksPickedCount = selectionData.week2 ? 2 : 1;
-    const currentWeeksSelected = turnData[userRowIndex][weeksSelectedIdx];
-    turnSheet.getRange(userRowIndex + 2, weeksSelectedIdx + 1).setValue(currentWeeksSelected + weeksPickedCount);
-    turnSheet.getRange(userRowIndex + 2, statusIdx + 1).setValue('Completed');
-
-    if (selectionData.week2) {
-        turnSheet.getRange(userRowIndex + 2, skipIdx + 1).setValue(true);
-    }
-
-    // If we just filled the last spot in the whole sheet, clear queue and exit early
-    if (totalSpotsRemaining === 0) {
-        return { success: true, message: "Selection recorded. Selection process is now complete." };
-    }
-
-    // Since authorization relies on computed queue window and 'Completed' status,
-    // we don't strictly need to write 'Waiting', 'Active', etc. to the sheet anymore
-    // except for skips. Let's consume skips that fall within the *new* window.
-    // Wait, the rule says: "Consume skips only under the script lock during state transitions."
-    // If a person inside the new 3-person window has SkipNextTurn = true, we consume it and mark them Completed.
-
-    let loopGuard = 0;
-    let nextRound = currentRound;
-
-    while (loopGuard < 100) {
-        loopGuard++;
-        let currentTurnDataRaw = turnSheet.getDataRange().getValues();
-        let queueWindowData = calculateQueueWindow(currentTurnDataRaw, nextRound);
-
-        // Find if anyone in the new window (offset 0, 1, 2 from anchor) has skipNextTurn = true
-        let anchorIndex = queueWindowData.findIndex(person => person.status !== 'Completed');
-
-        if (anchorIndex === -1) {
-             // Round is over
-             if (nextRound === 1) {
-                 // Try to automatically transition to Round 2
-                 const transitionResult = _transitionToRound2(turnSheet, configSheet, turnSheet.getDataRange().getValues());
-                 if (!transitionResult.success) {
-                     // Transition failed, stay in Round 1, but selection was successful
-                     return { success: true, message: "Selection recorded. Round 1 complete. Could not auto-start Round 2: " + transitionResult.message };
-                 }
-                 // Transition succeeded, move to Round 2 processing
-                 nextRound++;
-                 turnDataRaw = turnSheet.getDataRange().getValues(); // Refresh stale memory data
-                 continue;
-             } else {
-                 nextRound++;
-                 configSheet.getRange("B2").setValue(nextRound);
-                 let rows = turnSheet.getDataRange().getValues();
-                 rows.shift();
-                 rows.forEach((row, index) => {
-                     turnSheet.getRange(index + 2, statusIdx + 1).setValue('Waiting');
-                 });
-                 turnDataRaw = turnSheet.getDataRange().getValues(); // Refresh stale memory data
-                 continue; // re-evaluate for the new round
-             }
-        }
-
-        let skippedSomeone = false;
-        for (let offset = 0; offset < 3; offset++) {
-            const personIndex = anchorIndex + offset;
-            if (personIndex < queueWindowData.length) {
-                let person = queueWindowData[personIndex];
-                if (person.status !== 'Completed' && person.skipNextTurn === true) {
-                    // Consume skip
-                    let originalDataRow = turnData.findIndex(row => row[nameIdx] === person.name);
-                    turnSheet.getRange(originalDataRow + 2, skipIdx + 1).setValue(false);
-                    turnSheet.getRange(originalDataRow + 2, statusIdx + 1).setValue('Completed');
-                    skippedSomeone = true;
-                }
-            }
-        }
-
-        if (!skippedSomeone) {
-            break; // stable state
-        }
-    }
-
-    return { success: true, message: "Selection recorded." };
-      }; // end executeLogic
-    coreResult = executeLogic();
-    if (!coreResult || !coreResult.success) {
-      return { coreResult: coreResult || { success: false, message: "Unknown error" }, createdRowIndices: [] };
-    }
-
-    // Success path: compute after window and generated notifications
-    const afterRound = configSheet.getRange("B2").getValue();
-    const afterWindowRaw = turnSheet.getDataRange().getValues();
-    const afterWindow = calculateQueueWindow(afterWindowRaw, afterRound);
-
-    let createdRowIndices = [];
-    try {
-      createdRowIndices = computePendingNotifications(beforeWindow, afterWindow, afterRound, beforeRound, afterWindowRaw);
-    } catch (err) {
-      console.error("Failed to compute pending notifications: " + err.message);
-      createdRowIndices = [];
-    }
-    return { coreResult, createdRowIndices };
-  } catch (e) {
-    return { coreResult: { success: false, message: "An error occurred: " + e.message } };
-  }
-}
-
-function testQueueWindowBehavior() {
-    // 1, 2, 3 Active
-    const headers = ['Name', 'PIN', 'SeniorityPosition', 'Status', 'WeeksSelected', 'LotteryPosition', 'SkipNextTurn'];
-    const turnDataRaw = [
-        headers,
-        ['Person1', '1234', 1, 'Waiting', 0, 1, false],
-        ['Person2', '1234', 2, 'Waiting', 0, 2, false],
-        ['Person3', '1234', 3, 'Waiting', 0, 3, false],
-        ['Person4', '1234', 4, 'Waiting', 0, 4, false],
-        ['Person5', '1234', 5, 'Waiting', 0, 5, false],
-    ];
-
-    let computed = calculateQueueWindow(turnDataRaw, 1);
-    if (computed[0].computedStatus !== 'Active' || computed[1].computedStatus !== 'Standby' || computed[2].computedStatus !== 'Backup') {
-        throw new Error("Initial window incorrect");
-    }
-    if (computed[3].computedStatus !== 'Waiting') throw new Error("Person 4 should be waiting");
-
-    // Person 2 completes
-    turnDataRaw[2][3] = 'Completed';
-    computed = calculateQueueWindow(turnDataRaw, 1);
-
-    if (computed[0].computedStatus !== 'Active') throw new Error("Person 1 should be Active");
-    if (computed[1].computedStatus !== 'Completed') throw new Error("Person 2 should be Completed");
-    if (computed[2].computedStatus !== 'Backup') throw new Error("Person 3 should be Backup");
-    if (computed[3].computedStatus !== 'Waiting') throw new Error("Person 4 should be Waiting");
-
-    // Person 1 completes
-    turnDataRaw[1][3] = 'Completed';
-    computed = calculateQueueWindow(turnDataRaw, 1);
-
-    if (computed[2].computedStatus !== 'Active') throw new Error("Person 3 should be Active");
-    if (computed[3].computedStatus !== 'Standby') throw new Error("Person 4 should be Standby");
-    if (computed[4].computedStatus !== 'Backup') throw new Error("Person 5 should be Backup");
-
-    console.log('PASS: testQueueWindowBehavior');
-}
-
-function testQueueWindowSkipNextTurn() {
-    const headers = ['Name', 'PIN', 'SeniorityPosition', 'Status', 'WeeksSelected', 'LotteryPosition', 'SkipNextTurn'];
-    const turnDataRaw = [
-        headers,
-        ['Person1', '1234', 1, 'Waiting', 0, 1, false],
-        ['Person2', '1234', 2, 'Waiting', 0, 2, true], // Skipping
-        ['Person3', '1234', 3, 'Waiting', 0, 3, false],
-        ['Person4', '1234', 4, 'Waiting', 0, 4, false],
-    ];
-
-    let computed = calculateQueueWindow(turnDataRaw, 1);
-    if (computed[0].computedStatus !== 'Active') throw new Error("Person 1 should be Active");
-    if (computed[1].computedStatus !== 'Waiting') throw new Error("Person 2 should be Waiting (skipped)");
-    if (computed[2].computedStatus !== 'Backup') throw new Error("Person 3 should be Backup");
-    if (computed[3].computedStatus !== 'Waiting') throw new Error("Person 4 should be Waiting (hole is left)");
-
-    console.log('PASS: testQueueWindowSkipNextTurn');
-}
-function testThemeColorValidation() {
-  if (validateHexColor('#FFFFFF') !== '#FFFFFF') throw new Error('Failed to validate valid hex');
-  if (validateHexColor(' #ff0000 ') !== '#FF0000') throw new Error('Failed to trim and uppercase hex');
-  if (validateHexColor('#FFF') !== null) throw new Error('Failed to reject 3-digit hex');
-  if (validateHexColor('#FFFFFFFF') !== null) throw new Error('Failed to reject 8-digit hex');
-  if (validateHexColor('rgb(255,0,0)') !== null) throw new Error('Failed to reject rgb()');
-  if (validateHexColor('red') !== null) throw new Error('Failed to reject named color');
-  console.log('PASS: testThemeColorValidation');
-}
-
-function testThemeLuminance() {
-  if (getContrastTextColor('#000000') !== '#FFFFFF') throw new Error('Black background needs white text');
-  if (getContrastTextColor('#FFFFFF') !== '#000000') throw new Error('White background needs black text');
-  console.log('PASS: testThemeLuminance');
-}
-
-function testThemeParserRobustness() {
-  let ss;
-  let originalGetActive;
-  try {
-    ss = setupMockSpreadsheet();
-    originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
-    SpreadsheetApp.getActiveSpreadsheet = () => ss;
-
-    // Test missing tab
-    let config = getThemeColorConfig();
-    if (config.boring['--bg-color'] !== THEME_COLOR_DEFAULTS.boring['--bg-color']) {
-      throw new Error("Missing tab should fall back to default");
-    }
-
-    // Insert tab with missing themes
-    let sheet = ss.insertSheet('Theme Colors');
-    sheet.appendRow(['Role', 'CSS Variable', 'Boring', 'Anesthesia']); // Add Anesthesia column for subsequent tests
-    sheet.appendRow(['BG', '--bg-color', '#111111', 'invalid']); // Boring gets #111111, Anesthesia gets invalid
-
-    config = getThemeColorConfig();
-    if (config.boring['--bg-color'] !== '#111111') throw new Error("Should parse valid Boring color");
-    if (config.ketamine['--bg-color'] !== THEME_COLOR_DEFAULTS.ketamine['--bg-color']) {
-      throw new Error("Missing Ketamine column should fall back to default");
-    }
-
-    // Unknown variable and duplicate handling
-    sheet.appendRow(['Unknown', '--unknown-var', '#222222']);
-    sheet.appendRow(['BG Dup', '--bg-color', '#333333', '#222222']); // Boring ignores #333333 (already parsed valid row 2), Anesthesia gets #222222 (first valid)
-
-    config = getThemeColorConfig();
-    if (config.boring['--unknown-var'] !== undefined) throw new Error("Should ignore unknown variables");
-    if (config.boring['--bg-color'] !== '#111111') throw new Error("Should ignore duplicate variables if already processed valid");
-    if (config.anesthesia['--bg-color'] !== '#222222') throw new Error("Should accept later duplicate if first was not valid");
-
-    // Invalid value fallback
-    sheet.appendRow(['Surface', '--surface-main', 'invalid']);
-    config = getThemeColorConfig();
-    if (config.boring['--surface-main'] !== THEME_COLOR_DEFAULTS.boring['--surface-main']) {
-      throw new Error("Invalid value should fall back to default individually");
-    }
-
-    // Invalid first, valid second duplicate
-    sheet.appendRow(['Accent', '--accent-color', 'invalid', '#222222']); // Boring invalid, Anesthesia valid
-    sheet.appendRow(['Accent', '--accent-color', '#333333', '#444444']); // Boring gets #333333 (first valid), Anesthesia ignores #444444 (already processed valid)
-    config = getThemeColorConfig();
-
-    if (config.boring['--accent-color'] !== '#333333') throw new Error("Boring should accept second row valid if first was invalid");
-    if (config.anesthesia['--accent-color'] !== '#222222') throw new Error("Anesthesia should keep first row valid, ignore second");
-
-    console.log('PASS: testThemeParserRobustness');
-  } finally {
-    if (originalGetActive) {
-      SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
-    }
-    if (ss) {
-      const files = DriveApp.getFilesByName(ss.getName());
-      while (files.hasNext()) files.next().setTrashed(true);
-    }
-  }
-}
-
-function testThemeCssGeneration() {
-  const mockConfig = {
-    boring: { '--bg-color': '#111111', '--accent-color': '#FFFFFF; } body { display:none' }, // Malicious injection attempt
-    anesthesia: {},
-    ketamine: {}
+function sendSmsViaTwilio(to, body) {
+  const props = _smsDependencies.getProperties();
+  const sid = props['TWILIO_ACCOUNT_SID'];
+  const token = props['TWILIO_AUTH_TOKEN'];
+  const from = props['TWILIO_FROM_NUMBER'];
+
+  if (sid === 'TEST_SID') return { success: true, messageSid: 'SM_MOCK' };
+
+  const url = `https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`;
+  const options = {
+    method: 'post',
+    headers: { Authorization: 'Basic ' + Utilities.base64Encode(sid + ':' + token) },
+    payload: { To: to, From: from, Body: body },
+    muteHttpExceptions: true
   };
 
-  // Test builder does not throw when passed incomplete or malformed config
-  let css;
   try {
-     css = buildThemeOverridesCss(mockConfig);
-  } catch(e) {
-     throw new Error('Builder threw when passed incomplete config');
+    const response = _smsDependencies.fetch(url, options);
+    const result = JSON.parse(response.getContentText());
+    if (response.getResponseCode() === 201) return { success: true, messageSid: result.sid };
+    else return { success: false, error: result.message };
+  } catch (e) {
+    return { success: false, error: "Network failed: " + e.message };
   }
-
-  if (!css.includes('html[data-theme="boring"] {') || !css.includes('--bg-color: #111111;')) {
-    throw new Error('Failed to generate safe CSS from config');
-  }
-
-  if (css.includes('display:none')) {
-    throw new Error('Failed to reject injected malicious CSS');
-  }
-
-  if (!css.includes(`--accent-color: ${THEME_COLOR_DEFAULTS.boring['--accent-color']};`)) {
-    throw new Error('Failed to fall back to default when injected CSS is invalid');
-  }
-
-  console.log('PASS: testThemeCssGeneration');
 }
 
-function runThemeColorTests() {
-  testThemeColorValidation();
-  testThemeLuminance();
-  testThemeParserRobustness();
-  testThemeCssGeneration();
+
+// ============================================================================
+// NEW TESTS
+// ============================================================================
+
+function runAllNewTests() {
+    testStrictSerpentineBoundary();
+    testTransferOfferLocking();
+    testTwilioTokenNonExposure();
 }
 
-function runTests() {
-  testQueueWindowBehavior();
-  testQueueWindowSkipNextTurn();
-  testDashboardDataExtraction();
-  runThemeColorTests();
-  runSmsTests();
-  runAdminTests();
-}
-
-function testRound1SelectableWeeks() {
-  const rows = [
-    [new Date('2026-06-01'), ' Prime ', '', '', '', '', 4],
-    [new Date('2026-10-05'), 'non-prime', '', '', '', '', 3]
-  ];
-
-  const weeks = buildAvailableWeekData(rows);
-
-  const primeCount = weeks.filter(
-    week => week.classification === 'Prime'
-  ).length;
-
-  const nonPrimeCount = weeks.filter(
-    week => week.classification === 'Non-Prime'
-  ).length;
-
-  if (primeCount !== 1) {
-    throw new Error('Expected one selectable Prime week.');
-  }
-
-  if (nonPrimeCount !== 1) {
-    throw new Error('Expected one selectable Non-Prime week.');
-  }
-
-  console.log('PASS: Round 1 includes Prime and Non-Prime options.');
-}
-
-function testInvalidClassification() {
-  const rows = [
-    [new Date('2026-06-01'), ' Prime ', '', '', '', '', 4],
-    [new Date('2026-10-05'), 'UnknownType', '', '', '', '', 3]
-  ];
-
-  const weeks = buildAvailableWeekData(rows);
-  const invalid = weeks.filter(w => w.classification === null);
-
-  if (invalid.length !== 1) {
-    throw new Error('Expected one invalid classification.');
-  }
-
-  console.log('PASS: Invalid classification properly detected.');
-}
-
-function testDashboardDataExtraction() {
+function testStrictSerpentineBoundary() {
+    // Tests that the queue does not reverse until all participants finish.
     let ss;
+    const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
     try {
-        ss = setupMockSpreadsheet();
-        const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
+        ss = SpreadsheetApp.create('Test Strict Boundary');
         SpreadsheetApp.getActiveSpreadsheet = () => ss;
+        setupSpreadsheetSchema();
 
-        try {
-            // Setup some test data in mock spreadsheet
-            const turnSheet = ss.getSheetByName('Turn Management');
-            const weekSheet = ss.getSheetByName('Week Availability');
+        const turnSheet = ss.getSheetByName('Turn Management');
+        const configSheet = ss.getSheetByName('Config');
+        _setConfigValue('CurrentPhase', 'VACATION_RANDOM');
+        _setConfigValue('CurrentRound', 2);
+        _setConfigValue('CurrentDirection', 'DESCENDING');
 
-            // Give Person1 2 weeks selected, and SkipNextTurn true
-            // Headers: Name(1), PIN(2), SeniorityPosition(3), Status(4), WeeksSelected(5), LotteryPosition(6), SkipNextTurn(7)
-            turnSheet.getRange(2, 5).setValue(2);
-            turnSheet.getRange(2, 7).setValue(true);
-
-            // Assign Person1 to week 1 (Prime) in P1 col
-            weekSheet.getRange(2, 3).setValue('Person1');
-
-            // Assign Person1 to week 2 (Non-Prime) in P2 col
-            weekSheet.getRange(3, 4).setValue('Person1');
-
-            // Assign Person2 to week 2 (Non-Prime) in P3 col
-            weekSheet.getRange(3, 5).setValue('Person2');
-
-            // Assign Person3 to week 2 (Non-Prime) in P4 col
-            weekSheet.getRange(3, 6).setValue('Person3');
-
-            // Test Person1 extraction (P1 and P2 cols)
-            let dashboard1 = getDashboardData('Person1');
-            if (dashboard1.currentUser.weeksSelected !== 2) throw new Error("Expected weeksSelected to be 2 for Person1");
-            if (dashboard1.currentUser.skipNextTurn !== true) throw new Error("Expected skipNextTurn to be true for Person1");
-            if (dashboard1.currentUser.selectedWeeks.length !== 2) throw new Error("Expected selectedWeeks length to be 2 for Person1");
-            if (dashboard1.currentUser.selectedWeeks[0].classification !== 'Prime') throw new Error("Expected first selected week to be Prime");
-
-            // Test Person2 extraction (P3 col)
-            let dashboard2 = getDashboardData('Person2');
-            if (dashboard2.currentUser.selectedWeeks.length !== 1) throw new Error("Expected selectedWeeks length to be 1 for Person2");
-
-            // Test Person3 extraction (P4 col)
-            let dashboard3 = getDashboardData('Person3');
-            if (dashboard3.currentUser.selectedWeeks.length !== 1) throw new Error("Expected selectedWeeks length to be 1 for Person3");
-
-            // Test Person4 extraction (no weeks)
-            let dashboard4 = getDashboardData('Person4');
-            if (dashboard4.currentUser.selectedWeeks.length !== 0) throw new Error("Expected selectedWeeks length to be 0 for Person4");
-
-            console.log("PASS: testDashboardDataExtraction");
-
-        } finally {
-            SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
+        // Setup Lottery
+        for (let i = 2; i <= 6; i++) {
+            turnSheet.getRange(i, 6).setValue(i - 1);
         }
+
+        turnSheet.getRange(6, 4).setValue('Completed');
+        turnSheet.getRange(5, 4).setValue('Completed');
+        turnSheet.getRange(4, 4).setValue('Completed');
+        turnSheet.getRange(3, 4).setValue('Completed');
+
+        turnSheet.getRange(2, 4).setValue('Completed');
+        let advanced = _advanceQueueDirectionIfComplete();
+        if (!advanced) throw new Error("Boundary should have advanced.");
+        if (_getConfigValue('CurrentDirection') !== 'ASCENDING') throw new Error("Direction didn't reverse");
+        if (_getConfigValue('CurrentRound') !== 3) throw new Error("Round didn't increment");
+
+        console.log("PASS: testStrictSerpentineBoundary");
     } finally {
+        SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
         if (ss) {
             const files = DriveApp.getFilesByName(ss.getName());
             while (files.hasNext()) files.next().setTrashed(true);
@@ -2096,1541 +1552,162 @@ function testDashboardDataExtraction() {
     }
 }
 
-function runMoreTests() {
-  testRound1SelectableWeeks();
-  testInvalidClassification();
-}
-
-// ============================================================================
-// INTEGRATION TESTS
-// ============================================================================
-
-function setupMockSpreadsheet() {
-    // We create a temporary spreadsheet for true end-to-end testing
-    const ss = SpreadsheetApp.create('Temp Test SS - Vacation Selection');
-
-    const turnSheet = ss.insertSheet('Turn Management');
-    turnSheet.appendRow(['Name', 'PIN', 'SeniorityPosition', 'Status', 'WeeksSelected', 'LotteryPosition', 'SkipNextTurn']);
-    turnSheet.appendRow(['Person1', '1234', 1, 'Waiting', 0, 1, false]);
-    turnSheet.appendRow(['Person2', '1234', 2, 'Waiting', 0, 2, false]);
-    turnSheet.appendRow(['Person3', '1234', 3, 'Waiting', 0, 3, false]);
-    turnSheet.appendRow(['Person4', '1234', 4, 'Waiting', 0, 4, false]);
-    turnSheet.appendRow(['Person5', '1234', 5, 'Waiting', 0, 5, false]);
-
-    const weekSheet = ss.insertSheet('Week Availability');
-    weekSheet.appendRow(['WeekStartDate', 'Classification', 'Person1', 'Person2', 'Person3', 'Person4', 'SpotsRemaining']);
-    weekSheet.appendRow([new Date('2026-06-01'), 'Prime', '', '', '', '', 4]);
-    weekSheet.appendRow([new Date('2026-10-05'), 'Non-Prime', '', '', '', '', 4]);
-    weekSheet.appendRow([new Date('2026-11-02'), 'Non-Prime', '', '', '', '', 4]);
-    weekSheet.appendRow([new Date('2026-12-07'), 'Non-Prime', '', '', '', '', 4]); // Valid classification for preflight tests
-
-    const configSheet = ss.insertSheet('Config');
-    configSheet.getRange('A2').setValue('CurrentRound');
-    configSheet.getRange('B2').setValue(1);
-    configSheet.getRange('A3').setValue('SelectionStarted');
-    configSheet.getRange('B3').setValue(false);
-
-    // Delete the default 'Sheet1'
-    const sheet1 = ss.getSheetByName('Sheet1');
-    if (sheet1) ss.deleteSheet(sheet1);
-
-    return ss;
-}
-
-function runIntegrationTests() {
-    console.log("Running Integration Tests...");
-
+function testTransferOfferLocking() {
     let ss;
+    const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
     try {
-        ss = setupMockSpreadsheet();
-        // Temporarily override SpreadsheetApp.getActiveSpreadsheet to return our temp sheet
-        const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
+        ss = SpreadsheetApp.create('Test Transfer');
         SpreadsheetApp.getActiveSpreadsheet = () => ss;
+        setupSpreadsheetSchema();
 
-        try {
-            // Turn on SelectionStarted for general integration tests
-            ss.getSheetByName('Config').getRange('B3').setValue(true);
+        const turnSheet = ss.getSheetByName('Turn Management');
+        const partSheet = ss.getSheetByName('Participant Config');
 
-            // TEST 1: Person 4 rejected initially
-            let res = processSelection({ name: 'Person4', week1: ss.getSheetByName('Week Availability').getRange(2, 1).getValue().getTime() });
-            if (res.success) throw new Error("Person 4 should have been rejected (outside window).");
-            console.log("PASS: Person 4 rejected initially.");
+        _setConfigValue('CurrentPhase', 'TRANSFER_OFFER_COLLECTION');
+        _setConfigValue('TransferLocked', true);
+        partSheet.getRange(2, partSheet.getDataRange().getValues()[0].indexOf('Transfer Giver') + 1).setValue(true);
 
-            // TEST 2: Person 2 can select while Person 1 unfinished
-            let weekTime2 = ss.getSheetByName('Week Availability').getRange(3, 1).getValue().getTime();
-            res = processSelection({ name: 'Person2', week1: weekTime2 });
-            if (!res.success) throw new Error("Person 2 should succeed.");
-            console.log("PASS: Person 2 selected while Person 1 is unfinished.");
+        let res = _processTransferOffer({ name: 'Person1', offers: [{type: 'Weekend', dateEpoch: 123, details: 'test'}] }, ss, turnSheet);
+        if (res.success) throw new Error("Should not be able to offer when locked.");
+        if (res.message.indexOf("Locked") === -1) throw new Error("Wrong error message for lock.");
 
-            // TEST 3: Person 4 STILL rejected
-            res = processSelection({ name: 'Person4', week1: ss.getSheetByName('Week Availability').getRange(2, 1).getValue().getTime() });
-            if (res.success) throw new Error("Person 4 should STILL be rejected (window anchored at Person 1).");
-            console.log("PASS: Person 4 remains rejected because window is 1, 3, 4 (2 is completed). Wait... 1, 3, 4 is the window? No. 1, 2, 3 is the original window. 2 is completed. The permitted window consists of the anchor and the next TWO positions. So anchor=1, offset=0 (1), offset=1 (2-completed), offset=2 (3). So Person 4 is still offset 3, thus outside the window!");
-
-            // TEST 4: Person 1 submits
-            res = processSelection({ name: 'Person1', week1: ss.getSheetByName('Week Availability').getRange(2, 1).getValue().getTime() });
-            if (!res.success) throw new Error("Person 1 should succeed.");
-            console.log("PASS: Person 1 selected. Anchor should move to 3.");
-
-            // TEST 5: Person 4 now accepted (Anchor=3, window=3,4,5)
-            res = processSelection({ name: 'Person4', week1: ss.getSheetByName('Week Availability').getRange(2, 1).getValue().getTime() });
-            if (!res.success) throw new Error("Person 4 should succeed now that anchor moved to 3.");
-            console.log("PASS: Person 4 accepted in new window.");
-
-            // TEST 6: Invalid Classification Request Rejected
-            ss.getSheetByName('Week Availability').getRange(5, 2).setValue('UnknownType');
-            let invalidTime = ss.getSheetByName('Week Availability').getRange(5, 1).getValue().getTime();
-            res = processSelection({ name: 'Person3', week1: invalidTime });
-            if (res.success) throw new Error("Person 3 selecting invalid classification should fail.");
-            console.log("PASS: Invalid classification rejected.");
-
-            // TEST 7: Descending Lottery Round
-            ss.getSheetByName('Config').getRange('B2').setValue(3); // Round 3 is descending
-            // Reset statuses to Waiting
-            let turnSheet = ss.getSheetByName('Turn Management');
-            for(let i=2; i<=6; i++) turnSheet.getRange(i, 4).setValue('Waiting');
-
-            // Queue should be: Person5 (anchor), Person4, Person3, Person2, Person1
-            // Person 2 should fail initially
-            res = processSelection({ name: 'Person2', week1: weekTime2 });
-            if (res.success) throw new Error("Person 2 should be rejected in descending round 3 (window is 5,4,3).");
-            console.log("PASS: Descending round window calculation correct.");
-
-        } finally {
-            // Restore SpreadsheetApp
-            SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
-        }
-    } catch(e) {
-        console.error("Integration test failed:", e.message);
-        throw e;
+        console.log("PASS: testTransferOfferLocking");
     } finally {
+        SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
         if (ss) {
-            // Clean up temporary spreadsheet
             const files = DriveApp.getFilesByName(ss.getName());
-            while (files.hasNext()) {
-                files.next().setTrashed(true);
-            }
+            while (files.hasNext()) files.next().setTrashed(true);
         }
     }
 }
 
-// ============================================================================
-// SMS NOTIFICATIONS
-// ============================================================================
-
-/** Dependencies mapping for testing */
-var _smsDependencies = {
-  getProperties: () => PropertiesService.getScriptProperties().getProperties(),
-  fetch: (url, params) => UrlFetchApp.fetch(url, params)
-};
-
-/**
- * Validates SMS configuration
- * @returns {object} { valid: boolean, message: string }
- */
-function checkSmsConfiguration() {
-  const props = _smsDependencies.getProperties();
-  const required = ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_FROM_NUMBER', 'VACATION_SELECTOR_URL'];
-  const missing = required.filter(key => !props[key] || String(props[key]).trim() === '');
-
-  if (missing.length > 0) {
-    return { valid: false, message: "Missing SMS configuration: " + missing.join(', ') };
-  }
-  return { valid: true, message: "SMS configuration is complete." };
-}
-
-/**
- * Checks if SMS notifications are globally enabled
- */
-function isSmsEnabled() {
-  const props = _smsDependencies.getProperties();
-  const val = String(props['SMS_NOTIFICATIONS_ENABLED'] || '').toLowerCase();
-  return val === 'true' || val === '1' || val === 'yes';
-}
-
-/**
- * Sends an SMS via Twilio
- * @param {string} to - E.164 phone number
- * @param {string} body - SMS content
- * @returns {object} { success: boolean, messageSid?: string, error?: string }
- */
-function sendSmsViaTwilio(to, body) {
-  const props = _smsDependencies.getProperties();
-  const sid = props['TWILIO_ACCOUNT_SID'];
-  const token = props['TWILIO_AUTH_TOKEN'];
-  const from = props['TWILIO_FROM_NUMBER'];
-
-  if (!sid || !token || !from) {
-    return { success: false, error: "Missing Twilio credentials" };
-  }
-
-  const twilioUrl = `https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`;
-
-  const payload = {
-    "To": to,
-    "From": from,
-    "Body": body
-  };
-
-  const options = {
-    method: "post",
-    headers: {
-      "Authorization": "Basic " + Utilities.base64Encode(`${sid}:${token}`)
-    },
-    payload: payload,
-    muteHttpExceptions: true
-  };
-
-  try {
-    const response = _smsDependencies.fetch(twilioUrl, options);
-    const responseCode = response.getResponseCode();
-    const responseText = response.getContentText();
-
-    let responseJson = {};
+function testTwilioTokenNonExposure() {
+    let ss;
+    const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
     try {
-      responseJson = JSON.parse(responseText);
-    } catch (e) {}
+        ss = SpreadsheetApp.create('Test Twilio');
+        SpreadsheetApp.getActiveSpreadsheet = () => ss;
+        setupSpreadsheetSchema();
 
-    if (responseCode >= 200 && responseCode < 300) {
-      return { success: true, messageSid: responseJson.sid || "Unknown SID" };
-    } else {
-      return { success: false, error: `Twilio Error ${responseCode}: ${responseJson.message || responseText}` };
-    }
-  } catch (e) {
-    return { success: false, error: "Request failed: " + e.message };
-  }
-}
+        const adminSheet = ss.getSheetByName('Admin Options');
+        adminSheet.appendRow(['TWILIO_AUTH_TOKEN', 'SECRET123', 'desc']);
 
-/**
- * Computes pending notifications for new entrants to the window.
- * Writes PENDING rows to the Notification Log.
- * Must be called under the script lock.
- * @returns {number[]} Array of row indices created in the Notification Log
- */
-function computePendingNotifications(beforeWindow, afterWindow, afterRound, currentRound, afterWindowRaw) {
-  if (!isSmsEnabled()) return [];
+        let dbData = getDashboardData('Person1');
+        let jsonStr = JSON.stringify(dbData);
+        if (jsonStr.indexOf('SECRET123') !== -1) throw new Error("Dashboard payload leaked Twilio token!");
 
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const logSheet = ss.getSheetByName('Notification Log');
-  if (!logSheet) return []; // Schema not set up yet
-
-  const logData = logSheet.getDataRange().getValues();
-  const logHeaders = logData[0] || [];
-  const dedupeIdx = logHeaders.indexOf('DedupeKey');
-
-  // If no dedupe col, we can't safely notify
-  if (dedupeIdx === -1) return [];
-
-  // Get existing dedupe keys to prevent duplicates
-  const existingKeys = new Set();
-  for (let i = 1; i < logData.length; i++) {
-    if (logData[i][dedupeIdx]) {
-      existingKeys.add(String(logData[i][dedupeIdx]));
-    }
-  }
-
-  // Find participants who are in the Active, Standby, or Backup roles NOW
-  const targetRoles = ['Active', 'Standby', 'Backup'];
-  const newEntrants = [];
-
-  afterWindow.forEach(afterPerson => {
-    if (targetRoles.includes(afterPerson.computedStatus)) {
-      // Were they in a target role BEFORE?
-      // Wait, the requirement says "A participant should receive only one window-entry SMS per round, even if ... they move from Backup to Standby ... Standby to Active"
-      // Therefore, the dedupe key is all that matters.
-      // But to be clean, let's also check if they weren't in a target role before OR if round changed.
-      const beforePerson = beforeWindow.find(p => p.name === afterPerson.name);
-
-      let newlyEntered = false;
-      if (!beforePerson) {
-        newlyEntered = true;
-      } else if (afterRound !== currentRound) {
-        newlyEntered = true;
-      } else if (!targetRoles.includes(beforePerson.computedStatus)) {
-        newlyEntered = true;
-      }
-
-      const dedupeKey = `ROUND:${afterRound}|ENTERED_WINDOW|NAME:${afterPerson.name}`;
-
-      // Even if newlyEntered is false, if they somehow lack a notification for this round's entry, send it.
-      // The dedupe key is the ultimate source of truth.
-      if (newlyEntered && !existingKeys.has(dedupeKey)) {
-        newEntrants.push({
-          name: afterPerson.name,
-          role: afterPerson.computedStatus,
-          dedupeKey: dedupeKey,
-          round: afterRound
-        });
-        existingKeys.add(dedupeKey); // prevent dupes in the same batch
-      }
-    }
-  });
-
-  if (newEntrants.length === 0) return [];
-
-  // We need phone numbers
-  const turnHeaders = afterWindowRaw[0];
-  const nameIdx = turnHeaders.indexOf('Name');
-  const phoneIdx = turnHeaders.indexOf('PhoneNumber');
-
-  const createdRowIndices = [];
-
-  // Columns: Timestamp, DedupeKey, ParticipantName, Round, CalculatedRole, Status, TwilioMessageSid, Error
-  const tsIdx = logHeaders.indexOf('Timestamp');
-  const nameLogIdx = logHeaders.indexOf('ParticipantName');
-  const roundIdx = logHeaders.indexOf('Round');
-  const roleIdx = logHeaders.indexOf('CalculatedRole');
-  const statusIdx = logHeaders.indexOf('Status');
-
-  const nextRowIndex = logSheet.getLastRow() + 1;
-  let currentRowOffset = 0;
-
-  newEntrants.forEach(entrant => {
-    let phoneNum = null;
-    if (phoneIdx !== -1 && nameIdx !== -1) {
-      const pRow = afterWindowRaw.find(r => r[nameIdx] === entrant.name);
-      if (pRow) phoneNum = String(pRow[phoneIdx] || '').trim();
-    }
-
-    // Determine initial status based on phone number presence
-    let initialStatus = 'PENDING';
-    if (!phoneNum) {
-      initialStatus = 'SKIPPED_NO_PHONE';
-      console.log(`Skipping SMS for ${entrant.name} - no phone number.`);
-    }
-
-    const rowData = new Array(logHeaders.length).fill('');
-    if (tsIdx !== -1) rowData[tsIdx] = new Date();
-    if (dedupeIdx !== -1) rowData[dedupeIdx] = entrant.dedupeKey;
-    if (nameLogIdx !== -1) rowData[nameLogIdx] = entrant.name;
-    if (roundIdx !== -1) rowData[roundIdx] = entrant.round;
-    if (roleIdx !== -1) rowData[roleIdx] = entrant.role;
-    if (statusIdx !== -1) rowData[statusIdx] = initialStatus;
-
-    logSheet.appendRow(rowData);
-
-    if (initialStatus === 'PENDING') {
-      createdRowIndices.push(nextRowIndex + currentRowOffset);
-    }
-    currentRowOffset++;
-  });
-
-  return createdRowIndices;
-}
-
-/**
- * Processes PENDING notifications, making external calls to Twilio.
- * Must run OUTSIDE the script lock.
- * @param {number[]} rowIndices - Indices in the Notification Log sheet
- */
-function _processPendingNotifications(rowIndices) {
-  if (!rowIndices || rowIndices.length === 0) return;
-
-  const configCheck = checkSmsConfiguration();
-  const props = _smsDependencies.getProperties();
-  const vacationUrl = props['VACATION_SELECTOR_URL']; // No fallback
-
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const logSheet = ss.getSheetByName('Notification Log');
-  if (!logSheet) return;
-
-  const logHeaders = logSheet.getRange(1, 1, 1, logSheet.getLastColumn()).getValues()[0];
-  const nameIdx = logHeaders.indexOf('ParticipantName');
-  const roundIdx = logHeaders.indexOf('Round');
-  const roleIdx = logHeaders.indexOf('CalculatedRole');
-  const statusIdx = logHeaders.indexOf('Status');
-  const sidIdx = logHeaders.indexOf('TwilioMessageSid');
-  const errorIdx = logHeaders.indexOf('Error');
-
-  const turnSheet = ss.getSheetByName('Turn Management');
-  const turnData = turnSheet.getDataRange().getValues();
-  const tNameIdx = turnData[0].indexOf('Name');
-  const tPhoneIdx = turnData[0].indexOf('PhoneNumber');
-
-  rowIndices.forEach(rowIdx => {
-    // Re-read row to ensure it's still PENDING
-    const rowRange = logSheet.getRange(rowIdx, 1, 1, logHeaders.length);
-    const rowValues = rowRange.getValues()[0];
-
-    if (rowValues[statusIdx] !== 'PENDING') return;
-
-    // Mark PROCESSING
-    logSheet.getRange(rowIdx, statusIdx + 1).setValue('PROCESSING');
-
-    const pName = rowValues[nameIdx];
-    const pRound = rowValues[roundIdx];
-    const pRole = rowValues[roleIdx];
-
-    // Find phone number
-    let phoneNum = null;
-    if (tNameIdx !== -1 && tPhoneIdx !== -1) {
-      const pRow = turnData.find(r => r[tNameIdx] === pName);
-      if (pRow) phoneNum = String(pRow[tPhoneIdx] || '').trim();
-    }
-
-    if (!phoneNum) {
-      logSheet.getRange(rowIdx, statusIdx + 1).setValue('SKIPPED_NO_PHONE');
-      if (errorIdx !== -1) logSheet.getRange(rowIdx, errorIdx + 1).setValue('No phone number found');
-      return;
-    }
-
-    if (!configCheck.valid) {
-      logSheet.getRange(rowIdx, statusIdx + 1).setValue('FAILED');
-      if (errorIdx !== -1) logSheet.getRange(rowIdx, errorIdx + 1).setValue(configCheck.message);
-      return;
-    }
-
-    // Build and send SMS
-    const msg = `Vacation Week Selection: You are now in the Round ${pRound} selection window as ${pRole}. Make your selection here: ${vacationUrl}`;
-    const result = sendSmsViaTwilio(phoneNum, msg);
-
-    if (result.success) {
-      logSheet.getRange(rowIdx, statusIdx + 1).setValue('SENT');
-      if (sidIdx !== -1) logSheet.getRange(rowIdx, sidIdx + 1).setValue(result.messageSid);
-    } else {
-      logSheet.getRange(rowIdx, statusIdx + 1).setValue('FAILED');
-      if (errorIdx !== -1) logSheet.getRange(rowIdx, errorIdx + 1).setValue(result.error);
-    }
-  });
-}
-
-/**
- * Admin function to manually notify the current window
- */
-function sendCurrentWindowNotifications() {
-  if (!isSmsEnabled()) {
-    return "SMS notifications are disabled in configuration.";
-  }
-
-  const lock = LockService.getScriptLock();
-  lock.waitLock(30000);
-  let pendingRowIndices = [];
-  try {
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const configSheet = ss.getSheetByName('Config');
-    const turnSheet = ss.getSheetByName('Turn Management');
-    const currentRound = configSheet.getRange("B2").getValue();
-    const turnDataRaw = turnSheet.getDataRange().getValues();
-
-    // Simulate before window (empty) and after window (current) to trigger notifications for everyone in the window
-    const currentWindow = calculateQueueWindow(turnDataRaw, currentRound);
-
-    pendingRowIndices = computePendingNotifications([], currentWindow, currentRound, currentRound, turnDataRaw);
-  } finally {
-    lock.releaseLock();
-  }
-
-  if (pendingRowIndices && pendingRowIndices.length > 0) {
-    try {
-      _processPendingNotifications(pendingRowIndices);
-      return `Processed ${pendingRowIndices.length} notifications.`;
-    } catch (e) {
-      return "Error processing notifications: " + e.message;
-    }
-  }
-  return "No new notifications to send for the current window.";
-}
-
-/**
- * Admin function to send a test SMS explicitly bypassing some checks
- */
-function sendTestSms(name) {
-  const check = checkSmsConfiguration();
-  if (!check.valid) {
-    return "Cannot send test SMS: " + check.message;
-  }
-
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const turnSheet = ss.getSheetByName('Turn Management');
-  const turnData = turnSheet.getDataRange().getValues();
-  const tNameIdx = turnData[0].indexOf('Name');
-  const tPhoneIdx = turnData[0].indexOf('PhoneNumber');
-
-  if (tNameIdx === -1 || tPhoneIdx === -1) {
-    return "Phone number schema is not setup.";
-  }
-
-  const pRow = turnData.find(r => r[tNameIdx] === name);
-  if (!pRow) return "Participant not found.";
-
-  const phoneNum = String(pRow[tPhoneIdx] || '').trim();
-  if (!phoneNum) return "Participant has no phone number on record.";
-
-  const msg = "TEST MESSAGE: Vacation Week Selection SMS Configuration is working.";
-  const result = sendSmsViaTwilio(phoneNum, msg);
-
-  if (result.success) {
-    return "Test SMS sent successfully. SID: " + result.messageSid;
-  } else {
-    return "Test SMS failed: " + result.error;
-  }
-}
-
-// ============================================================================
-// SMS TESTS
-// ============================================================================
-
-function testSmsConfigurationValidation() {
-  const originalGet = _smsDependencies.getProperties;
-  try {
-    // Missing all
-    _smsDependencies.getProperties = () => ({});
-    if (checkSmsConfiguration().valid) throw new Error("Should fail when missing properties");
-
-    // Has all
-    _smsDependencies.getProperties = () => ({
-      TWILIO_ACCOUNT_SID: '123',
-      TWILIO_AUTH_TOKEN: '456',
-      TWILIO_FROM_NUMBER: '789',
-      VACATION_SELECTOR_URL: 'http://test.com'
-    });
-    if (!checkSmsConfiguration().valid) throw new Error("Should pass with all properties");
-
-    console.log("PASS: testSmsConfigurationValidation");
-  } finally {
-    _smsDependencies.getProperties = originalGet;
-  }
-}
-
-function testSmsEnabledFlag() {
-  const originalGet = _smsDependencies.getProperties;
-  try {
-    _smsDependencies.getProperties = () => ({ SMS_NOTIFICATIONS_ENABLED: 'true' });
-    if (!isSmsEnabled()) throw new Error("Should be enabled");
-
-    _smsDependencies.getProperties = () => ({ SMS_NOTIFICATIONS_ENABLED: 'False' });
-    if (isSmsEnabled()) throw new Error("Should be disabled");
-
-    console.log("PASS: testSmsEnabledFlag");
-  } finally {
-    _smsDependencies.getProperties = originalGet;
-  }
-}
-
-function testComputePendingNotifications() {
-  const originalGet = _smsDependencies.getProperties;
-  let ss;
-  const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
-  try {
-    _smsDependencies.getProperties = () => ({ SMS_NOTIFICATIONS_ENABLED: 'true' });
-
-    ss = SpreadsheetApp.create('Temp Test SS - SMS Notif');
-    SpreadsheetApp.getActiveSpreadsheet = () => ss;
-
-    // Missing Notification Log
-    const indices1 = computePendingNotifications([], [], 1, 1, []);
-    if (indices1.length > 0) throw new Error("Should handle missing log sheet safely");
-
-    ss.insertSheet('Notification Log').appendRow(['Timestamp', 'DedupeKey', 'ParticipantName', 'Round', 'CalculatedRole', 'Status']);
-
-    const beforeWindow = [
-      { name: 'P1', computedStatus: 'Active' },
-      { name: 'P2', computedStatus: 'Standby' }
-    ];
-
-    const afterWindow = [
-      { name: 'P1', computedStatus: 'Completed' },
-      { name: 'P2', computedStatus: 'Active' },
-      { name: 'P3', computedStatus: 'Standby' },
-      { name: 'P4', computedStatus: 'Backup' } // new entrants
-    ];
-
-    const turnHeaders = ['Name', 'PhoneNumber'];
-    const turnDataRaw = [
-      turnHeaders,
-      ['P1', '111'],
-      ['P2', '222'],
-      ['P3', '333'],
-      ['P4', '444'] // newly entered
-    ];
-
-    const indices2 = computePendingNotifications(beforeWindow, afterWindow, 1, 1, turnDataRaw);
-    if (indices2.length !== 2) throw new Error("Expected exactly 2 new notifications (for P3 and P4)");
-
-    // Deduplication check
-    const indices3 = computePendingNotifications(beforeWindow, afterWindow, 1, 1, turnDataRaw);
-    if (indices3.length !== 0) throw new Error("Should not create duplicates in same round");
-
-    console.log("PASS: testComputePendingNotifications");
-  } finally {
-    _smsDependencies.getProperties = originalGet;
-    SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
-    if (ss) {
-      const files = DriveApp.getFilesByName(ss.getName());
-      while (files.hasNext()) files.next().setTrashed(true);
-    }
-  }
-}
-
-function testProcessPendingNotificationsMissingPhone() {
-  const originalGet = _smsDependencies.getProperties;
-  let ss;
-  const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
-  try {
-    _smsDependencies.getProperties = () => ({ SMS_NOTIFICATIONS_ENABLED: 'true', VACATION_SELECTOR_URL: 'http' });
-    ss = SpreadsheetApp.create('Temp Test SS - Process SMS');
-    SpreadsheetApp.getActiveSpreadsheet = () => ss;
-
-    const logSheet = ss.insertSheet('Notification Log');
-    logSheet.appendRow(['Timestamp', 'DedupeKey', 'ParticipantName', 'Round', 'CalculatedRole', 'Status', 'TwilioMessageSid', 'Error']);
-    logSheet.appendRow(['', 'k1', 'NoPhonePerson', 1, 'Active', 'PENDING', '', '']);
-
-    const turnSheet = ss.insertSheet('Turn Management');
-    turnSheet.appendRow(['Name', 'PhoneNumber']);
-    turnSheet.appendRow(['NoPhonePerson', '']); // blank phone
-
-    _processPendingNotifications([2]); // row index 2
-
-    const status = logSheet.getRange(2, 6).getValue();
-    if (status !== 'SKIPPED_NO_PHONE') throw new Error("Should skip if no phone number");
-
-    console.log("PASS: testProcessPendingNotificationsMissingPhone");
-  } finally {
-    _smsDependencies.getProperties = originalGet;
-    SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
-    if (ss) {
-      const files = DriveApp.getFilesByName(ss.getName());
-      while (files.hasNext()) files.next().setTrashed(true);
-    }
-  }
-}
-
-function runSmsTests() {
-  testSmsConfigurationValidation();
-  testSmsEnabledFlag();
-  testComputePendingNotifications();
-  testProcessPendingNotificationsMissingPhone();
-  testProcessSelectionSmsIntegration();
-  testProcessPendingNotificationsMissingConfig();
-}
-
-function testProcessSelectionSmsIntegration() {
-  const originalGet = _smsDependencies.getProperties;
-  let ss;
-  const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
-  try {
-    // Enable SMS
-    _smsDependencies.getProperties = () => ({ SMS_NOTIFICATIONS_ENABLED: 'true', VACATION_SELECTOR_URL: 'http' });
-
-    ss = setupMockSpreadsheet();
-    SpreadsheetApp.getActiveSpreadsheet = () => ss;
-
-    // Setup Notification Log & PhoneNumber schema
-    setupSpreadsheetSchema();
-    const turnSheet = ss.getSheetByName('Turn Management');
-    const logSheet = ss.getSheetByName('Notification Log');
-
-    // Set Phone numbers for test
-    const turnData = turnSheet.getDataRange().getValues();
-    const headers = turnData[0];
-    const phoneIdx = headers.indexOf('PhoneNumber');
-    for (let i = 1; i <= 5; i++) {
-        turnSheet.getRange(i + 1, phoneIdx + 1).setValue('555-1234');
-    }
-
-    // Simulate Person 1 selection (moving window)
-    const weekTime = ss.getSheetByName('Week Availability').getRange(2, 1).getValue().getTime();
-    const res = processSelection({ name: 'Person1', week1: weekTime });
-
-    if (!res.success) throw new Error("Selection should be successful");
-
-    const logData = logSheet.getDataRange().getValues();
-    const logHeaders = logData[0];
-
-    // When Person 1 completes, the window moves to 2, 3, 4.
-    // Person 4 should be the new entrant (Backup).
-    const nameLogIdx = logHeaders.indexOf('ParticipantName');
-
-    const newEntrantsLogs = logData.slice(1).filter(r => r[nameLogIdx] === 'Person4');
-    if (newEntrantsLogs.length !== 1) throw new Error("Expected exactly one notification log for the new entrant (Person 4)");
-
-    // Ensure failure to log doesn't fail processSelection
-    // Sabotage computePendingNotifications by renaming the sheet so it throws or fails gracefully
-    logSheet.setName('HiddenLog');
-
-    const weekTime2 = ss.getSheetByName('Week Availability').getRange(3, 1).getValue().getTime();
-    const res2 = processSelection({ name: 'Person2', week1: weekTime2 });
-
-    if (!res2.success) throw new Error("Selection should be successful even if SMS/logging fails");
-
-    console.log("PASS: testProcessSelectionSmsIntegration");
-  } finally {
-    _smsDependencies.getProperties = originalGet;
-    SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
-    if (ss) {
-      const files = DriveApp.getFilesByName(ss.getName());
-      while (files.hasNext()) files.next().setTrashed(true);
-    }
-  }
-}
-
-function testProcessPendingNotificationsMissingConfig() {
-  const originalGet = _smsDependencies.getProperties;
-  const originalFetch = _smsDependencies.fetch;
-  let ss;
-  const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
-  let fetchCalled = false;
-
-  try {
-    // Missing VACATION_SELECTOR_URL
-    _smsDependencies.getProperties = () => ({
-      SMS_NOTIFICATIONS_ENABLED: 'true',
-      TWILIO_ACCOUNT_SID: '123',
-      TWILIO_AUTH_TOKEN: '456',
-      TWILIO_FROM_NUMBER: '789'
-    });
-
-    _smsDependencies.fetch = () => {
-       fetchCalled = true;
-       return { getResponseCode: () => 200, getContentText: () => '{}' };
-    };
-
-    ss = SpreadsheetApp.create('Temp Test SS - Config Missing');
-    SpreadsheetApp.getActiveSpreadsheet = () => ss;
-
-    const logSheet = ss.insertSheet('Notification Log');
-    logSheet.appendRow(['Timestamp', 'DedupeKey', 'ParticipantName', 'Round', 'CalculatedRole', 'Status', 'TwilioMessageSid', 'Error']);
-    logSheet.appendRow(['', 'k1', 'PersonWithPhone', 1, 'Active', 'PENDING', '', '']);
-
-    const turnSheet = ss.insertSheet('Turn Management');
-    turnSheet.appendRow(['Name', 'PhoneNumber']);
-    turnSheet.appendRow(['PersonWithPhone', '555-1234']);
-
-    _processPendingNotifications([2]); // row index 2
-
-    const status = logSheet.getRange(2, 6).getValue();
-    const errorMsg = logSheet.getRange(2, 8).getValue();
-
-    if (fetchCalled) throw new Error("Should not call Twilio fetch if config is invalid");
-    if (status !== 'FAILED') throw new Error("Status should be FAILED");
-    if (String(errorMsg).indexOf('Missing SMS configuration') === -1) throw new Error("Should log configuration error");
-
-    console.log("PASS: testProcessPendingNotificationsMissingConfig");
-  } finally {
-    _smsDependencies.getProperties = originalGet;
-    _smsDependencies.fetch = originalFetch;
-    SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
-    if (ss) {
-      const files = DriveApp.getFilesByName(ss.getName());
-      while (files.hasNext()) files.next().setTrashed(true);
-    }
-  }
-}
-function setupAdminControl(skipTrigger = false) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  let sheet = ss.getSheetByName('Admin Control');
-
-  if (!sheet) {
-    sheet = ss.insertSheet('Admin Control');
-  } else {
-    sheet.clear();
-  }
-
-  // Set column widths
-  sheet.setColumnWidth(1, 60);
-  sheet.setColumnWidth(2, 300);
-
-  // A1:B1 - VACATION ADMIN CONTROL
-  sheet.getRange('A1:B1').merge().setValue('VACATION ADMIN CONTROL')
-    .setFontWeight('bold').setFontSize(14).setHorizontalAlignment('center');
-
-  // A2:B2 - Short instruction
-  sheet.getRange('A2:B2').merge().setValue('Complete the checklist, then check Start Round 1.')
-    .setFontStyle('italic').setHorizontalAlignment('center').setWrap(true);
-
-  // A4:B4 - PRE-START CHECKLIST
-  sheet.getRange('A4:B4').merge().setValue('PRE-START CHECKLIST')
-    .setFontWeight('bold').setBackground('#f3f4f6');
-
-  // A5:B9 - Checkboxes and labels
-  sheet.getRange('A5:A9').insertCheckboxes();
-  sheet.getRange('B5').setValue('Roster reviewed');
-  sheet.getRange('B6').setValue('Seniority order reviewed');
-  sheet.getRange('B7').setValue('Lottery order reviewed');
-  sheet.getRange('B8').setValue('Week calendar Dates reviewed');
-  sheet.getRange('B9').setValue('Phone numbers and PINs reviewed');
-
-  // A11:B11 - START SELECTION
-  sheet.getRange('A11:B11').merge().setValue('START SELECTION')
-    .setFontWeight('bold').setBackground('#f3f4f6');
-
-  // A12:B12 - Action checkbox
-  sheet.getRange('A12').insertCheckboxes();
-  sheet.getRange('B12').setValue('START ROUND 1').setFontWeight('bold');
-
-  // A14:B14 - LAST ACTION RESULT
-  sheet.getRange('A14:B14').merge().setValue('LAST ACTION RESULT')
-    .setFontWeight('bold').setBackground('#f3f4f6');
-
-  // A15:B17 - Status, Timestamp, Details
-  sheet.getRange('A15').setValue('Status:');
-  sheet.getRange('A16').setValue('Timestamp:');
-  sheet.getRange('A17').setValue('Details:');
-
-  sheet.getRange('B15').setValue('NOT STARTED');
-  sheet.getRange('B16').setValue('-');
-  sheet.getRange('B17').setValue('-');
-  sheet.getRange('B15:B17').setWrap(true);
-
-  // Increase row heights for mobile readability
-  for (let r = 1; r <= 17; r++) {
-    sheet.setRowHeight(r, 40);
-  }
-
-  // Install trigger
-  if (!skipTrigger) {
-    installAdminControlTrigger();
-  }
-
-  return "Admin Control tab created successfully.";
-}
-
-function installAdminControlTrigger() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const triggers = ScriptApp.getUserTriggers(ss);
-
-  let triggerExists = false;
-  for (let i = 0; i < triggers.length; i++) {
-    if (triggers[i].getHandlerFunction() === 'adminControlOnEdit') {
-      triggerExists = true;
-      break;
-    }
-  }
-
-  if (!triggerExists) {
-    ScriptApp.newTrigger('adminControlOnEdit')
-      .forSpreadsheet(ss)
-      .onEdit()
-      .create();
-  }
-}
-
-function adminControlOnEdit(e) {
-  if (!e || !e.range) return;
-  const range = e.range;
-  const sheet = range.getSheet();
-
-  if (sheet.getName() !== 'Admin Control') return;
-
-  // Check if edited cell is A12 (Start Round 1 checkbox)
-  if (range.getRow() === 12 && range.getColumn() === 1) {
-    const isChecked = range.getValue() === true;
-    if (!isChecked) return; // Only process when checked
-
-    // We should lock here
-    const lock = LockService.getScriptLock();
-    // Wait for up to 30 seconds
-    const locked = lock.tryLock(30000);
-    if (!locked) {
-      sheet.getRange('B15').setValue('❌ ERROR');
-      sheet.getRange('B16').setValue(new Date().toLocaleString());
-      sheet.getRange('B17').setValue('Could not acquire system lock. Please try again.');
-      range.setValue(false); // Reset
-      return;
-    }
-
-    let pendingRowIndices = [];
-
-    try {
-      // Re-read A12 to ensure it wasn't double tapped
-      if (range.getValue() !== true) return;
-
-      // Verify A5:A9 are true
-      const checklistValues = sheet.getRange('A5:A9').getValues();
-      const allChecked = checklistValues.every(row => row[0] === true);
-      if (!allChecked) {
-        sheet.getRange('B15').setValue('❌ NOT STARTED');
-        sheet.getRange('B16').setValue(new Date().toLocaleString());
-        sheet.getRange('B17').setValue('All pre-start checklist items must be confirmed.');
-        range.setValue(false);
-        return;
-      }
-
-      // Run preflight checks
-      const preflight = runPreflightChecks();
-      if (!preflight.valid) {
-        sheet.getRange('B15').setValue('❌ NOT STARTED');
-        sheet.getRange('B16').setValue(new Date().toLocaleString());
-        sheet.getRange('B17').setValue(preflight.message);
-        range.setValue(false);
-        return;
-      }
-
-      // Check if already running using SelectionStarted config
-      const ss = SpreadsheetApp.getActiveSpreadsheet();
-      const configSheet = ss.getSheetByName('Config');
-      const turnSheet = ss.getSheetByName('Turn Management');
-      const turnData = turnSheet.getDataRange().getValues();
-
-      let selectionStarted = false;
-      const configData = configSheet.getDataRange().getValues();
-      let startedRowIdx = -1;
-      for (let i = 0; i < configData.length; i++) {
-        if (configData[i][0] === 'SelectionStarted') {
-          selectionStarted = (configData[i][1] === true || String(configData[i][1]).toUpperCase() === 'TRUE');
-          startedRowIdx = i + 1;
-          break;
-        }
-      }
-
-      if (selectionStarted) {
-        sheet.getRange('B15').setValue('❌ NOT STARTED');
-        sheet.getRange('B16').setValue(new Date().toLocaleString());
-        sheet.getRange('B17').setValue('The selection process has already begun.');
-        range.setValue(false);
-        return;
-      }
-
-      // Start Round 1
-      configSheet.getRange('B2').setValue(1);
-
-      if (startedRowIdx !== -1) {
-        configSheet.getRange(startedRowIdx, 2).setValue(true);
-      } else {
-        configSheet.appendRow(['SelectionStarted', true]);
-      }
-
-      // Calculate queue to get initial notifications
-      const beforeWindow = []; // Empty since we just started
-      const currentWindow = calculateQueueWindow(turnData, 1);
-
-      pendingRowIndices = computePendingNotifications(beforeWindow, currentWindow, 1, 1, turnData);
-
-      sheet.getRange('B15').setValue('✅ READY — ROUND 1 STARTED');
-      sheet.getRange('B16').setValue(new Date().toLocaleString());
-      sheet.getRange('B17').setValue(`${turnData.length - 1} participants validated. Initial notifications queued.`);
-
-      range.setValue(false); // Reset checkbox
-
-    } catch(err) {
-      sheet.getRange('B15').setValue('❌ ERROR');
-      sheet.getRange('B16').setValue(new Date().toLocaleString());
-      sheet.getRange('B17').setValue(err.message);
-      range.setValue(false);
+        console.log("PASS: testTwilioTokenNonExposure");
     } finally {
-      lock.releaseLock();
+        SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
+        if (ss) {
+            const files = DriveApp.getFilesByName(ss.getName());
+            while (files.hasNext()) files.next().setTrashed(true);
+        }
     }
-
-    // Process SMS outside the lock
-    if (pendingRowIndices && pendingRowIndices.length > 0) {
-      try {
-        _processPendingNotifications(pendingRowIndices);
-      } catch (e) {
-        console.error("SMS notification processing failed during Round 1 start: " + e.message);
-      }
-    }
-  }
-}
-
-function runPreflightChecks() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const turnSheet = ss.getSheetByName('Turn Management');
-  const weekSheet = ss.getSheetByName('Week Availability');
-  const configSheet = ss.getSheetByName('Config');
-
-  if (!turnSheet) return { valid: false, message: 'Turn Management sheet is missing.' };
-  if (!weekSheet) return { valid: false, message: 'Week Availability sheet is missing.' };
-  if (!configSheet) return { valid: false, message: 'Config sheet is missing.' };
-
-  const turnData = turnSheet.getDataRange().getValues();
-  if (turnData.length < 2) return { valid: false, message: 'Turn Management has no participants.' };
-
-  const headers = turnData[0];
-
-  // Required columns
-  const required = ['Name', 'PIN', 'SeniorityPosition', 'Status', 'WeeksSelected', 'LotteryPosition', 'SkipNextTurn'];
-  for (let req of required) {
-    if (headers.indexOf(req) === -1) {
-      return { valid: false, message: `Missing required column in Turn Management: ${req}` };
-    }
-  }
-
-  const nameIdx = headers.indexOf('Name');
-  const pinIdx = headers.indexOf('PIN');
-  const senIdx = headers.indexOf('SeniorityPosition');
-  const lotIdx = headers.indexOf('LotteryPosition');
-
-  const names = new Set();
-  const senPositions = new Set();
-  const lotPositions = new Set();
-
-  for (let i = 1; i < turnData.length; i++) {
-    const row = turnData[i];
-    const name = String(row[nameIdx] || '').trim();
-    if (!name) return { valid: false, message: `Row ${i+1} has a blank name.` };
-    if (names.has(name)) return { valid: false, message: `Duplicate name found: ${name}` };
-    names.add(name);
-
-    const pin = String(row[pinIdx] || '').trim();
-    if (!pin) return { valid: false, message: `Participant ${name} is missing a PIN.` };
-
-    const sen = row[senIdx];
-    if (sen === '' || sen === null || sen === undefined) return { valid: false, message: `SeniorityPosition is blank for ${name}.` };
-    if (senPositions.has(sen)) return { valid: false, message: `SeniorityPosition ${sen} is duplicated.` };
-    senPositions.add(sen);
-
-    const lot = row[lotIdx];
-    if (lot === '' || lot === null || lot === undefined) return { valid: false, message: `LotteryPosition is blank for ${name}.` };
-    if (lotPositions.has(lot)) return { valid: false, message: `LotteryPosition ${lot} is duplicated.` };
-    lotPositions.add(lot);
-  }
-
-  // Week Availability Checks
-  const weekData = weekSheet.getDataRange().getValues();
-  if (weekData.length < 2) return { valid: false, message: 'No weeks defined in Week Availability.' };
-
-  const wHeaders = weekData[0];
-  if (wHeaders[0] !== 'WeekStartDate' || wHeaders[1] !== 'Classification' || wHeaders[6] !== 'SpotsRemaining') {
-    return { valid: false, message: 'Week Availability headers are incorrect.' };
-  }
-
-  for (let i = 1; i < weekData.length; i++) {
-    const row = weekData[i];
-    const date = row[0];
-    if (!date) return { valid: false, message: `Row ${i+1} in Week Availability is missing a Date.` };
-
-    const cls = normalizeClassification(row[1]);
-    if (!cls) return { valid: false, message: `Row ${i+1} has an invalid classification.` };
-
-    const spots = row[6];
-    if (spots === '' || spots === null || isNaN(spots) || spots < 0 || spots > 4) {
-      return { valid: false, message: `Row ${i+1} has an invalid SpotsRemaining value.` };
-    }
-  }
-
-  // Conditional SMS validation
-  if (isSmsEnabled()) {
-    const smsCheck = checkSmsConfiguration();
-    if (!smsCheck.valid) return smsCheck;
-
-    const phoneIdx = headers.indexOf('PhoneNumber');
-    if (phoneIdx === -1) return { valid: false, message: 'PhoneNumber column is missing but SMS is enabled.' };
-
-    for (let i = 1; i < turnData.length; i++) {
-      const phone = String(turnData[i][phoneIdx] || '').trim();
-      if (!phone) return { valid: false, message: `Participant ${turnData[i][nameIdx]} is missing a phone number, but SMS is enabled.` };
-    }
-  }
-
-  return { valid: true };
-}
-
-/**
- * Shared helper to safely transition the system from Round 1 to Round 2.
- * Validates that all participants have finished Round 1 and have unique lottery positions.
- * @returns {object} { success: boolean, message: string }
- */
-function _transitionToRound2(turnSheet, configSheet, turnDataRaw) {
-  const headers = turnDataRaw[0];
-  const statusIdx = headers.indexOf('Status');
-  const lotPosIdx = headers.indexOf('LotteryPosition');
-
-  if (statusIdx === -1) return { success: false, message: "Status column missing." };
-
-  // Verify everyone is completed
-  let isRound1Over = true;
-  for (let i = 1; i < turnDataRaw.length; i++) {
-    if (turnDataRaw[i][statusIdx] !== 'Completed') {
-      isRound1Over = false;
-      break;
-    }
-  }
-
-  if (!isRound1Over) {
-    return { success: false, message: "Round 1 is not fully complete. No action taken." };
-  }
-
-  // Verify lottery readiness
-  if (!checkLotteryReady(turnDataRaw)) {
-    return { success: false, message: "LotteryPosition is not correctly populated. Must have exactly one unique value per participant." };
-  }
-
-  // Validation passed, perform state transitions
-  configSheet.getRange("B2").setValue(2);
-
-  for (let i = 1; i < turnDataRaw.length; i++) {
-    turnSheet.getRange(i + 1, statusIdx + 1).setValue('Waiting');
-  }
-
-  return { success: true, message: "Lottery Round 2 Initialized Successfully." };
-}
-
-function testAdminControlMissingCheckboxes() {
-  let ss;
-  const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
-  const props = PropertiesService.getScriptProperties();
-  const originalSms = props.getProperty('SMS_NOTIFICATIONS_ENABLED');
-  try {
-    props.setProperty('SMS_NOTIFICATIONS_ENABLED', 'false'); // Disable SMS
-    ss = setupMockSpreadsheet();
-    SpreadsheetApp.getActiveSpreadsheet = () => ss;
-
-    // Create Admin Control
-    setupAdminControl(true);
-
-    const adminSheet = ss.getSheetByName('Admin Control');
-
-    // Uncheck one requirement
-    adminSheet.getRange('A5').setValue(false);
-
-    // Trigger start
-    adminSheet.getRange('A12').setValue(true);
-    adminControlOnEdit({ range: adminSheet.getRange('A12') });
-
-    const status = adminSheet.getRange('B15').getValue();
-    if (status !== '❌ NOT STARTED') throw new Error("Should not start if checklist is incomplete.");
-
-    console.log("PASS: testAdminControlMissingCheckboxes");
-  } finally {
-    if (originalSms !== null) {
-      props.setProperty('SMS_NOTIFICATIONS_ENABLED', originalSms);
-    } else {
-      props.deleteProperty('SMS_NOTIFICATIONS_ENABLED');
-    }
-    SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
-    if (ss) {
-      const files = DriveApp.getFilesByName(ss.getName());
-      while (files.hasNext()) files.next().setTrashed(true);
-    }
-  }
-}
-
-function testAdminControlAlreadyRunning() {
-  let ss;
-  const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
-  const props = PropertiesService.getScriptProperties();
-  const originalSms = props.getProperty('SMS_NOTIFICATIONS_ENABLED');
-  try {
-    props.setProperty('SMS_NOTIFICATIONS_ENABLED', 'false'); // Disable SMS
-    ss = setupMockSpreadsheet();
-    SpreadsheetApp.getActiveSpreadsheet = () => ss;
-    setupSpreadsheetSchema(); // Need skipNextTurn etc
-
-    // Make it look running using persistent state
-    const configSheet = ss.getSheetByName('Config');
-    configSheet.getRange('B3').setValue(true);
-
-    setupAdminControl(true);
-    const adminSheet = ss.getSheetByName('Admin Control');
-    adminSheet.getRange('A5:A9').setValue(true); // Check all
-    adminSheet.getRange('A12').setValue(true); // Trigger
-
-    adminControlOnEdit({ range: adminSheet.getRange('A12') });
-
-    const status = adminSheet.getRange('B15').getValue();
-    if (status !== '❌ NOT STARTED') throw new Error("Should not start if already running.");
-    if (adminSheet.getRange('B17').getValue().indexOf('already begun') === -1) throw new Error("Wrong error message for already running.");
-
-    console.log("PASS: testAdminControlAlreadyRunning");
-  } finally {
-    if (originalSms !== null) {
-      props.setProperty('SMS_NOTIFICATIONS_ENABLED', originalSms);
-    } else {
-      props.deleteProperty('SMS_NOTIFICATIONS_ENABLED');
-    }
-    SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
-    if (ss) {
-      const files = DriveApp.getFilesByName(ss.getName());
-      while (files.hasNext()) files.next().setTrashed(true);
-    }
-  }
-}
-
-function testAdminControlSuccessfulStart() {
-  let ss;
-  const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
-  const props = PropertiesService.getScriptProperties();
-  const originalSms = props.getProperty('SMS_NOTIFICATIONS_ENABLED');
-  try {
-    props.setProperty('SMS_NOTIFICATIONS_ENABLED', 'false'); // Disable SMS
-    ss = setupMockSpreadsheet();
-    SpreadsheetApp.getActiveSpreadsheet = () => ss;
-    setupSpreadsheetSchema(); // Need skipNextTurn etc
-
-    setupAdminControl(true);
-    const adminSheet = ss.getSheetByName('Admin Control');
-    adminSheet.getRange('A5:A9').setValue(true); // Check all
-    adminSheet.getRange('A12').setValue(true); // Trigger
-
-    adminControlOnEdit({ range: adminSheet.getRange('A12') });
-
-    const status = adminSheet.getRange('B15').getValue();
-    if (status !== '✅ READY — ROUND 1 STARTED') throw new Error("Failed to start Round 1. Status: " + status);
-    if (adminSheet.getRange('A12').getValue() === true) throw new Error("Checkbox should be reset");
-
-    console.log("PASS: testAdminControlSuccessfulStart");
-  } finally {
-    if (originalSms !== null) {
-      props.setProperty('SMS_NOTIFICATIONS_ENABLED', originalSms);
-    } else {
-      props.deleteProperty('SMS_NOTIFICATIONS_ENABLED');
-    }
-    SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
-    if (ss) {
-      const files = DriveApp.getFilesByName(ss.getName());
-      while (files.hasNext()) files.next().setTrashed(true);
-    }
-  }
-}
-
-function testAutomaticRound2Transition() {
-  let ss;
-  const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
-  const props = PropertiesService.getScriptProperties();
-  const originalSms = props.getProperty('SMS_NOTIFICATIONS_ENABLED');
-  try {
-    props.setProperty('SMS_NOTIFICATIONS_ENABLED', 'false'); // Disable SMS
-
-    ss = setupMockSpreadsheet();
-    SpreadsheetApp.getActiveSpreadsheet = () => ss;
-    setupSpreadsheetSchema(); // Get all columns
-
-    const configSheet = ss.getSheetByName('Config');
-    const turnSheet = ss.getSheetByName('Turn Management');
-    const weekSheet = ss.getSheetByName('Week Availability');
-
-    // Enable started state for transition tests
-    configSheet.getRange('B3').setValue(true);
-
-    // Everyone except Person5 is Complete
-    for (let i = 2; i <= 5; i++) {
-        turnSheet.getRange(i, 4).setValue('Completed'); // Status
-    }
-
-    // Simulate Person5 finishing
-    const res = processSelection({ name: 'Person5', week1: weekSheet.getRange(2, 1).getValue().getTime() });
-
-    if (!res.success) throw new Error("Selection should have succeeded: " + res.message);
-
-    const currentRound = configSheet.getRange('B2').getValue();
-    if (currentRound !== 2) throw new Error("Should have automatically transitioned to Round 2. Instead in round " + currentRound);
-
-    const p1Status = turnSheet.getRange(2, 4).getValue();
-    if (p1Status !== 'Waiting') throw new Error("Statuses should be reset to Waiting.");
-
-    console.log("PASS: testAutomaticRound2Transition");
-  } finally {
-    if (originalSms) {
-      props.setProperty('SMS_NOTIFICATIONS_ENABLED', originalSms);
-    } else {
-      props.deleteProperty('SMS_NOTIFICATIONS_ENABLED');
-    }
-    SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
-    if (ss) {
-      const files = DriveApp.getFilesByName(ss.getName());
-      while (files.hasNext()) files.next().setTrashed(true);
-    }
-  }
-}
-
-function runAdminTests() {
-  testAdminControlMissingCheckboxes();
-  testAdminControlAlreadyRunning();
-  testAdminControlSuccessfulStart();
-  testAutomaticRound2Transition();
-  testAdminControlMissingLottery();
-  testAdminControlRepeatedTaps();
-  testAutomaticRound2FailedSafely();
-  testAutomaticRound2SmsTransition();
-  testSelectionStartedEnforcement();
-}
-
-function testAdminControlMissingLottery() {
-  let ss;
-  const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
-  const props = PropertiesService.getScriptProperties();
-  const originalSms = props.getProperty('SMS_NOTIFICATIONS_ENABLED');
-  try {
-    props.setProperty('SMS_NOTIFICATIONS_ENABLED', 'false'); // Disable SMS
-    ss = setupMockSpreadsheet();
-    SpreadsheetApp.getActiveSpreadsheet = () => ss;
-    setupSpreadsheetSchema(); // Need skipNextTurn etc
-
-    // Mess up lottery position
-    const turnSheet = ss.getSheetByName('Turn Management');
-    turnSheet.getRange(2, 6).setValue(''); // Blank LotteryPosition for Person1
-
-    setupAdminControl(true);
-    const adminSheet = ss.getSheetByName('Admin Control');
-    adminSheet.getRange('A5:A9').setValue(true); // Check all
-    adminSheet.getRange('A12').setValue(true); // Trigger
-
-    adminControlOnEdit({ range: adminSheet.getRange('A12') });
-
-    const status = adminSheet.getRange('B15').getValue();
-    const details = adminSheet.getRange('B17').getValue();
-
-    if (status !== '❌ NOT STARTED') throw new Error("Should not start with missing lottery position.");
-    if (details.indexOf('LotteryPosition is blank') === -1) throw new Error("Missing correct error message. Got: " + details);
-
-    // Fix it, then make it duplicate
-    turnSheet.getRange(2, 6).setValue(2);
-    adminSheet.getRange('A12').setValue(true);
-    adminControlOnEdit({ range: adminSheet.getRange('A12') });
-
-    const statusDup = adminSheet.getRange('B15').getValue();
-    const detailsDup = adminSheet.getRange('B17').getValue();
-
-    if (statusDup !== '❌ NOT STARTED') throw new Error("Should not start with duplicate lottery position.");
-    if (detailsDup.indexOf('is duplicated') === -1) throw new Error("Missing correct error message for duplicate. Got: " + detailsDup);
-
-    console.log("PASS: testAdminControlMissingLottery");
-  } finally {
-    if (originalSms !== null) {
-      props.setProperty('SMS_NOTIFICATIONS_ENABLED', originalSms);
-    } else {
-      props.deleteProperty('SMS_NOTIFICATIONS_ENABLED');
-    }
-    SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
-    if (ss) {
-      const files = DriveApp.getFilesByName(ss.getName());
-      while (files.hasNext()) files.next().setTrashed(true);
-    }
-  }
-}
-
-function testAdminControlRepeatedTaps() {
-  let ss;
-  const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
-  const props = PropertiesService.getScriptProperties();
-  const originalSms = props.getProperty('SMS_NOTIFICATIONS_ENABLED');
-  try {
-    props.setProperty('SMS_NOTIFICATIONS_ENABLED', 'false'); // Disable SMS
-    ss = setupMockSpreadsheet();
-    SpreadsheetApp.getActiveSpreadsheet = () => ss;
-    setupSpreadsheetSchema(); // Need skipNextTurn etc
-
-    setupAdminControl(true);
-    const adminSheet = ss.getSheetByName('Admin Control');
-    adminSheet.getRange('A5:A9').setValue(true); // Check all
-    adminSheet.getRange('A12').setValue(true); // Trigger
-
-    // First tap starts it
-    adminControlOnEdit({ range: adminSheet.getRange('A12') });
-
-    const status = adminSheet.getRange('B15').getValue();
-    if (status !== '✅ READY — ROUND 1 STARTED') throw new Error("Failed to start Round 1 initially");
-
-    // Next tap should not reset anything
-    adminSheet.getRange('A12').setValue(true);
-    adminControlOnEdit({ range: adminSheet.getRange('A12') });
-
-    const status2 = adminSheet.getRange('B15').getValue();
-    if (status2 !== '❌ NOT STARTED') throw new Error("Repeated tap should be blocked as 'NOT STARTED'. Status: " + status2);
-
-    console.log("PASS: testAdminControlRepeatedTaps");
-  } finally {
-    if (originalSms !== null) {
-      props.setProperty('SMS_NOTIFICATIONS_ENABLED', originalSms);
-    } else {
-      props.deleteProperty('SMS_NOTIFICATIONS_ENABLED');
-    }
-    SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
-    if (ss) {
-      const files = DriveApp.getFilesByName(ss.getName());
-      while (files.hasNext()) files.next().setTrashed(true);
-    }
-  }
-}
-
-function testAutomaticRound2FailedSafely() {
-  let ss;
-  const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
-  const props = PropertiesService.getScriptProperties();
-  const originalSms = props.getProperty('SMS_NOTIFICATIONS_ENABLED');
-  try {
-    props.setProperty('SMS_NOTIFICATIONS_ENABLED', 'false'); // Disable SMS
-
-    ss = setupMockSpreadsheet();
-    SpreadsheetApp.getActiveSpreadsheet = () => ss;
-    setupSpreadsheetSchema(); // Get all columns
-
-    const configSheet = ss.getSheetByName('Config');
-    const turnSheet = ss.getSheetByName('Turn Management');
-    const weekSheet = ss.getSheetByName('Week Availability');
-
-    // Enable started state for transition tests
-    configSheet.getRange('B3').setValue(true);
-
-    // Make LotteryPosition duplicated to fail transition validation
-    turnSheet.getRange(2, 6).setValue(2);
-
-    // Everyone except Person5 is Complete
-    for (let i = 2; i <= 5; i++) {
-        turnSheet.getRange(i, 4).setValue('Completed'); // Status
-    }
-
-    // Simulate Person5 finishing
-    const res = processSelection({ name: 'Person5', week1: weekSheet.getRange(2, 1).getValue().getTime() });
-
-    if (!res.success) throw new Error("Selection should have succeeded even if transition failed: " + res.message);
-    if (res.message.indexOf('Could not auto-start') === -1) throw new Error("Should notify that auto-start failed.");
-
-    const currentRound = configSheet.getRange('B2').getValue();
-    if (currentRound !== 1) throw new Error("Should have stayed in round 1 because of validation failure. Currently in round: " + currentRound);
-
-    console.log("PASS: testAutomaticRound2FailedSafely");
-  } finally {
-    if (originalSms) {
-      props.setProperty('SMS_NOTIFICATIONS_ENABLED', originalSms);
-    } else {
-      props.deleteProperty('SMS_NOTIFICATIONS_ENABLED');
-    }
-    SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
-    if (ss) {
-      const files = DriveApp.getFilesByName(ss.getName());
-      while (files.hasNext()) files.next().setTrashed(true);
-    }
-  }
 }
 
 
-function testAutomaticRound2SmsTransition() {
-  let ss;
-  const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
-  const props = _smsDependencies.getProperties;
-  const originalFetch = _smsDependencies.fetch;
+// ============================================================================
+// NEW TESTS
+// ============================================================================
 
-  try {
-    // Enable SMS, and mock config for successful validation
-    _smsDependencies.getProperties = () => ({
-      SMS_NOTIFICATIONS_ENABLED: 'true',
-      TWILIO_ACCOUNT_SID: '123',
-      TWILIO_AUTH_TOKEN: '456',
-      TWILIO_FROM_NUMBER: '789',
-      VACATION_SELECTOR_URL: 'http'
-    });
-
-    // Mock the external network call to succeed and not throw
-    _smsDependencies.fetch = () => {
-      return {
-        getResponseCode: () => 200,
-        getContentText: () => JSON.stringify({ sid: 'SM123' })
-      };
-    };
-
-    ss = setupMockSpreadsheet();
-    SpreadsheetApp.getActiveSpreadsheet = () => ss;
-    setupSpreadsheetSchema(); // Need skipNextTurn, Notifications sheet, etc.
-
-    const configSheet = ss.getSheetByName('Config');
-    const turnSheet = ss.getSheetByName('Turn Management');
-    const weekSheet = ss.getSheetByName('Week Availability');
-    const logSheet = ss.getSheetByName('Notification Log');
-
-    // Set Phone numbers for test
-    const turnData = turnSheet.getDataRange().getValues();
-    const phoneIdx = turnData[0].indexOf('PhoneNumber');
-    for (let i = 1; i <= 5; i++) {
-        turnSheet.getRange(i + 1, phoneIdx + 1).setValue('555-1234');
-    }
-
-    // Enable started state for transition tests
-    configSheet.getRange('B3').setValue(true);
-
-    // Everyone except Person5 is Complete for Round 1
-    for (let i = 2; i <= 5; i++) {
-        turnSheet.getRange(i, 4).setValue('Completed'); // Status
-    }
-
-    // Wipe any existing logs (from other tests modifying mock sheet)
-    if (logSheet.getLastRow() > 1) {
-      logSheet.getRange(2, 1, logSheet.getLastRow() - 1, logSheet.getLastColumn()).clearContent();
-    }
-
-    // Simulate Person5 finishing Round 1
-    const res = processSelection({ name: 'Person5', week1: weekSheet.getRange(2, 1).getValue().getTime() });
-
-    if (!res.success) throw new Error("Selection should have succeeded: " + res.message);
-
-    const currentRound = configSheet.getRange('B2').getValue();
-    if (currentRound !== 2) throw new Error("Should have automatically transitioned to Round 2.");
-
-    // Verify Notification Log row generation
-    // Since Round 2 sorts by lottery position, people 1, 2, and 3 should be in the window
-    // and thus exactly 3 logs should exist.
-    const newLogs = logSheet.getDataRange().getValues();
-    // length is 4 (header + 3 logs)
-    if (newLogs.length !== 4) throw new Error("Expected exactly 3 notifications, got " + (newLogs.length - 1));
-
-    const roundIdx = newLogs[0].indexOf('Round');
-    const dedupeIdx = newLogs[0].indexOf('DedupeKey');
-    const statusIdx = newLogs[0].indexOf('Status');
-
-    for (let i = 1; i < newLogs.length; i++) {
-      if (newLogs[i][roundIdx] !== 2) throw new Error("Log has wrong round number: " + newLogs[i][roundIdx]);
-      if (newLogs[i][dedupeIdx].indexOf('ROUND:2') === -1) throw new Error("Log has wrong dedupe key: " + newLogs[i][dedupeIdx]);
-      if (newLogs[i][statusIdx] !== 'SENT') throw new Error("Log status is not SENT: " + newLogs[i][statusIdx]);
-    }
-
-    // Verify no duplicates created when evaluating round again
-    const windowRaw = turnSheet.getDataRange().getValues();
-    const window = calculateQueueWindow(windowRaw, 2);
-    const newIndices = computePendingNotifications([], window, 2, 2, windowRaw);
-    if (newIndices.length !== 0) throw new Error("Duplicate notifications were queued!");
-
-    console.log("PASS: testAutomaticRound2SmsTransition");
-  } finally {
-    _smsDependencies.getProperties = props;
-    _smsDependencies.fetch = originalFetch;
-    SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
-    if (ss) {
-      const files = DriveApp.getFilesByName(ss.getName());
-      while (files.hasNext()) files.next().setTrashed(true);
-    }
-  }
+function runAllNewTests() {
+    testStrictSerpentineBoundary();
+    testTransferOfferLocking();
+    testTwilioTokenNonExposure();
 }
 
+function testStrictSerpentineBoundary() {
+    // Tests that the queue does not reverse until all participants finish.
+    let ss;
+    const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
+    try {
+        ss = SpreadsheetApp.create('Test Strict Boundary');
+        SpreadsheetApp.getActiveSpreadsheet = () => ss;
+        setupSpreadsheetSchema();
 
-/**
- * Shared helper to check if the selection process has formally started
- */
-function isSelectionStarted() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const configSheet = ss.getSheetByName('Config');
-  if (!configSheet) return false;
+        const turnSheet = ss.getSheetByName('Turn Management');
+        const configSheet = ss.getSheetByName('Config');
+        _setConfigValue('CurrentPhase', 'VACATION_RANDOM');
+        _setConfigValue('CurrentRound', 2);
+        _setConfigValue('CurrentDirection', 'DESCENDING');
 
-  const configData = configSheet.getDataRange().getValues();
-  for (let i = 0; i < configData.length; i++) {
-    if (configData[i][0] === 'SelectionStarted') {
-      return (configData[i][1] === true || String(configData[i][1]).toUpperCase() === 'TRUE');
+        // Setup Lottery
+        for (let i = 2; i <= 6; i++) {
+            turnSheet.getRange(i, 6).setValue(i - 1);
+        }
+
+        turnSheet.getRange(6, 4).setValue('Completed');
+        turnSheet.getRange(5, 4).setValue('Completed');
+        turnSheet.getRange(4, 4).setValue('Completed');
+        turnSheet.getRange(3, 4).setValue('Completed');
+
+        turnSheet.getRange(2, 4).setValue('Completed');
+        let advanced = _advanceQueueDirectionIfComplete();
+        if (!advanced) throw new Error("Boundary should have advanced.");
+        if (_getConfigValue('CurrentDirection') !== 'ASCENDING') throw new Error("Direction didn't reverse");
+        if (_getConfigValue('CurrentRound') !== 3) throw new Error("Round didn't increment");
+
+        console.log("PASS: testStrictSerpentineBoundary");
+    } finally {
+        SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
+        if (ss) {
+            const files = DriveApp.getFilesByName(ss.getName());
+            while (files.hasNext()) files.next().setTrashed(true);
+        }
     }
-  }
-  return false;
 }
 
-function testSelectionStartedEnforcement() {
-  let ss;
-  const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
-  try {
-    ss = setupMockSpreadsheet();
-    SpreadsheetApp.getActiveSpreadsheet = () => ss;
+function testTransferOfferLocking() {
+    let ss;
+    const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
+    try {
+        ss = SpreadsheetApp.create('Test Transfer');
+        SpreadsheetApp.getActiveSpreadsheet = () => ss;
+        setupSpreadsheetSchema();
 
-    // Explicitly set SelectionStarted to FALSE
-    const configSheet = ss.getSheetByName('Config');
-    configSheet.getRange('B3').setValue(false);
+        const turnSheet = ss.getSheetByName('Turn Management');
+        const partSheet = ss.getSheetByName('Participant Config');
 
-    const weekSheet = ss.getSheetByName('Week Availability');
-    const weekTime = weekSheet.getRange(2, 1).getValue().getTime();
+        _setConfigValue('CurrentPhase', 'TRANSFER_OFFER_COLLECTION');
+        _setConfigValue('TransferLocked', true);
+        partSheet.getRange(2, partSheet.getDataRange().getValues()[0].indexOf('Transfer Giver') + 1).setValue(true);
 
-    // Test 1: Should fail
-    let res = processSelection({ name: 'Person1', week1: weekTime });
-    if (res.success) throw new Error("Selection should have failed when SelectionStarted = FALSE.");
-    if (res.message.indexOf("not started yet") === -1) throw new Error("Wrong error message: " + res.message);
+        let res = _processTransferOffer({ name: 'Person1', offers: [{type: 'Weekend', dateEpoch: 123, details: 'test'}] }, ss, turnSheet);
+        if (res.success) throw new Error("Should not be able to offer when locked.");
+        if (res.message.indexOf("Locked") === -1) throw new Error("Wrong error message for lock.");
 
-    // Set SelectionStarted to TRUE
-    configSheet.getRange('B3').setValue(true);
-
-    // Test 2: Should succeed
-    res = processSelection({ name: 'Person1', week1: weekTime });
-    if (!res.success) throw new Error("Selection should have succeeded when SelectionStarted = TRUE. " + res.message);
-
-    console.log("PASS: testSelectionStartedEnforcement");
-  } finally {
-    SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
-    if (ss) {
-      const files = DriveApp.getFilesByName(ss.getName());
-      while (files.hasNext()) files.next().setTrashed(true);
+        console.log("PASS: testTransferOfferLocking");
+    } finally {
+        SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
+        if (ss) {
+            const files = DriveApp.getFilesByName(ss.getName());
+            while (files.hasNext()) files.next().setTrashed(true);
+        }
     }
-  }
+}
+
+function testTwilioTokenNonExposure() {
+    let ss;
+    const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
+    try {
+        ss = SpreadsheetApp.create('Test Twilio');
+        SpreadsheetApp.getActiveSpreadsheet = () => ss;
+        setupSpreadsheetSchema();
+
+        const adminSheet = ss.getSheetByName('Admin Options');
+        adminSheet.appendRow(['TWILIO_AUTH_TOKEN', 'SECRET123', 'desc']);
+
+        let dbData = getDashboardData('Person1');
+        let jsonStr = JSON.stringify(dbData);
+        if (jsonStr.indexOf('SECRET123') !== -1) throw new Error("Dashboard payload leaked Twilio token!");
+
+        console.log("PASS: testTwilioTokenNonExposure");
+    } finally {
+        SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
+        if (ss) {
+            const files = DriveApp.getFilesByName(ss.getName());
+            while (files.hasNext()) files.next().setTrashed(true);
+        }
+    }
 }
