@@ -19,7 +19,7 @@
       <button type="button" class="theme-menu-item" role="menuitem" data-theme-val="ketamine" onclick="window.appFunctions.setTheme('ketamine')">Ketamine <span></span></button>
     </div>
 
-    <button type="button" id="rules-btn" class="auth-nav-link" onclick="window.appFunctions.showRulesModal()" style="margin-right: 8px;">Rules & Tips</button>
+    <button type="button" id="rules-btn" class="auth-nav-link hidden" onclick="window.appFunctions.showRulesModal()" style="margin-right: 8px;">Rules & Tips</button>
     <button type="button" id="nav-toggle" class="auth-nav-link">Login</button>
   </div>
 </header>
@@ -101,7 +101,18 @@
       <div id="selection-controls" class="hidden" style="margin-top: 1.5rem;">
         <h3 id="phase-selection-title">Make a Selection</h3>
         <p id="selection-rules" class="text-small"></p>
-        <button type="button" id="start-selection-btn" onclick="window.appFunctions.openPrimaryPicker()">Choose option</button>
+
+        <div id="vacation-controls-section" class="phase-controls hidden">
+            <button type="button" id="start-selection-btn" onclick="window.appFunctions.openPrimaryPicker()">Choose option</button>
+        </div>
+
+        <div id="transfer-offer-controls-section" class="phase-controls hidden">
+           <h3>Offer Transfer / Giveaway</h3>
+           <p class="text-small text-secondary">Select assignments you wish to offer to others. Offers are irrevocable once confirmed.</p>
+           <div id="owned-assignments-container" style="margin-bottom: 15px;"></div>
+           <button type="button" class="btn btn-primary" style="width:100%" onclick="window.appFunctions.submitTransferOffers()">Confirm & Submit Offers</button>
+        </div>
+
         <button type="button" id="pass-selection-btn" class="hidden btn btn-secondary" style="margin-top: 0.5rem;" onclick="window.appFunctions.submitPass()">Pass (Opt-out)</button>
 
         <div id="pending-selection-summary" class="hidden" style="margin-top:1rem; padding: 1rem; background-color: var(--bg-color); border-radius: 12px;">

@@ -25,7 +25,7 @@ const appFunctions = {
     } else {
        gatewayForm.classList.add('hidden'); closeBtn.classList.remove('hidden'); submitBtn.classList.add('hidden');
     }
-    google.script.run.withSuccessHandler(function(res) { contentDiv.innerHTML = res.content || 'No rules defined.'; }).getRulesAndTips(appState.currentUserName || '');
+    google.script.run.withSuccessHandler(function(res) { contentDiv.innerHTML = res.content || 'No rules defined.'; }).getRulesAndTips();
   },
   hideRulesModal: function() { document.getElementById('rules-modal').classList.add('hidden'); },
   submitRulesAcknowledgment: function() {
@@ -38,8 +38,11 @@ const appFunctions = {
     submitBtn.textContent = 'Saving...'; submitBtn.disabled = true;
     google.script.run.withSuccessHandler(function(res) {
        submitBtn.textContent = 'I Agree & Continue'; submitBtn.disabled = false;
-       if (res.success) { appFunctions.hideRulesModal(); appFunctions.loadDashboard(); }
-       else { alert("Error: " + res.message); }
+       if (res.success) {
+           appFunctions.hideRulesModal();
+           document.getElementById('rules-btn').classList.remove('hidden');
+           appFunctions.fetchDashboardData();
+       } else { alert("Error: " + res.message); }
     }).submitRulesAcknowledgment({ name: appState.currentUserName, holidayVolunteer: volunteerSelect.value, transferPreference: transferSelect.value });
   },
 
@@ -497,6 +500,7 @@ const appFunctions = {
           if (res.needsAcknowledgment) {
               this.showRulesModal(true);
           } else {
+              document.getElementById('rules-btn').classList.remove('hidden');
               this.fetchDashboardData();
           }
         } else {
@@ -757,6 +761,7 @@ const appFunctions = {
   resetSelection: function() {
     appState.pendingWeek1 = null;
     appState.pendingWeek2 = null;
+    appState.pendingSelection = null;
     this.updateSelectionSummaryUI();
   },
 
