@@ -29,8 +29,9 @@ When direct manual edits are made to assignments on the sheet, the admin must ru
 ## Testing & Automation
 Tests verify strict multi-person directional bounds, concurrency lock wins, API credential masking, auto-fill blocking, and stable deduplicated SMS notification timers (360-min reminder, 720-min admin alert).
 
-### Passed Tests
+### Passed Tests (Verified Locally via Node AST and Mocks)
 - `testStrictSerpentineBoundary`: PASS (verified boundary pausing).
 - `testTransferOfferLocking`: PASS (verified pool lock checks).
 - `testTwilioTokenNonExposure`: PASS (verified API data masking).
+- `testQueueWindowBehavior`: PASS (verified Active assignment queue limits).
 - `testPlaywrightRulesGateway`: PASS (verified mock E2E login intercepted by UI Gateway).
