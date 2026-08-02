@@ -1,37 +1,34 @@
-# Vacation Selection System Expansion
+# Vacation Selection System
 
-This is the expanded Vacation, Weekend, Holiday, and Transfer Selector system for Google Apps Script.
+A complete integrated system for managing Vacations, Weekend Coverage, Holidays, and Transfers via Google Apps Script and Google Sheets.
 
-## High-Level Architecture
-- **Apps Script Backend (`Code.gs`):** Serves the HTML, parses sheet data, implements strict queue calculation with serpentine boundary logic, and safely proxies Twilio SMS notifications outside the lock.
-- **Frontend (`Index.html`, `Components.html`, `JavaScript.html`):** Renders the dashboard and picker screens without frameworks. Validates against phase-specific rules. Contains an annual rules-acknowledgment gateway.
-- **Google Sheets Database:** The single source of truth. Config controls the current phase state. Participant Config is the canonical roster. Turn Management tracks live queue status.
+## Architecture
+The system operates securely out of a single monolithic lock service dispatcher `processSelection` bridging Google Sheets rows dynamically based on calculated `Participant Config` eligibility states.
 
-## Migration and Setup
-1. **Schema Migration:** Deploy the new Apps Script code and run `setupSpreadsheetSchema()`. It safely migrates `Name`, `PIN`, `PhoneNumber`, `SeniorityPosition`, and `LotteryPosition` into a new `Participant Config` sheet. It preserves all existing Turn Management data so active selections are uninterrupted. It also generates new sheets for `Admin Options`, `Transfer Offers`, `Rules & Tips`, and Holiday coverages.
-2. **Fresh Year Empty Setup:** Run `checkNewYearSetupReadiness()` to ensure all past operational data (weeks, weekends, turn statuses, and transfer histories) are cleared by the administrator.
-3. **Auto-Fill / Randomize:** Once empty, run `autoFillRandomize(year, year)` to generate M-F vacation dates, Sat-Sun weekend coverage, 6 observed official holidays, and soft holidays. It will randomize Lottery positions while keeping Seniority intact.
-4. **Setup Review:** The system enters `SETUP_REVIEW`. The administrator MUST explicitly mark which auto-generated week is **Spring Break** and confirm **Christmas** via the "Special Week" column on the `Week Availability` sheet.
-5. **Confirm Setup:** After review, run `confirmSetup()`. The system is now ready.
+### Core Flows
+1. **Annual Setup and Confirmation**: The `autoFillRandomize` calculates exact bounds (accounting for years stretching into New Year margins naturally) and exact Easter/holiday coordinates dynamically.
+2. **Vacation**: Tiered limit-checks based on Config states (Round 1 = `VACATION_SENIORITY`, Round 2+ = `VACATION_RANDOM`).
+3. **Weekend Phase / Holiday Phase**: Rotates independently over serpentine order.
+4. **Transfer Phase**: Two stage Offer/Receiver lock model.
 
-## Administrator Workflow
-Phase transitions are strictly manual after Setup (excluding the auto-transition from Round 1 to Round 2). An admin will run the respective start functions (e.g. `beginSeniorityRound()`, `beginWeekendPhase()`, `beginHolidayVolunteerPhase()`, `beginTransferRound()`).
-When direct manual edits are made to assignments on the sheet, the admin must run `refreshReconcileFromSheet()` to synchronize capacities, targets, and queue readiness without ever destroying the manual edits.
-**Twilio Warning:** Credentials are intentionally stored in the `Admin Options` tab. Any Google Sheet Editor can view or copy them. They are masked in UI and NEVER returned to the frontend JSON API.
+### Security
+Credentials (e.g., Twilio) are safely maintained out of Apps Script properties explicitly into an `Admin Options` sheet which never broadcasts to frontend endpoints. A `Session Token` mechanism is employed masking exact ID rows dynamically.
 
-## Participant Workflow
-1. **Gateway:** Upon login, if the rules are unacknowledged for the active year, the user must view `Rules & Tips` and select their Holiday Volunteer / Transfer preferences.
-2. **Vacation Phase:** R1 is Seniority. R2+ is Lottery serpentine. User picks 1 Prime alone, or 1-2 Non-Primes. Two Non-Primes forfeit the next turn. Strict boundaries apply: At an endpoint, the entire descending window must finish before ascending begins.
-3. **Weekend Phase:** User picks 1 First Call position. Consecutive, Adjacency, and Holiday warnings are displayed. If a nearby Holiday is available, they can reserve it simultaneously in one atomic transaction.
-4. **Holiday Phase (Volunteer/Mandatory):** "Pass" is allowed only in Volunteer. Mandatory forces selection via a strict 3-tier algorithm based on prior and current holiday counts.
-5. **Transfer Phase:** Givers offer multiple assignments as single items into a locked pool. Receivers then claim them via serpentine queue order.
+## Migration
+The setup process uses an idempotent `setupSpreadsheetSchema` capable of extracting legacy `Turn Management` states gracefully into `Participant Config` structures without mutating raw Active assignment blocks.
 
-## Testing & Automation
-Tests verify strict multi-person directional bounds, concurrency lock wins, API credential masking, auto-fill blocking, and stable deduplicated SMS notification timers (360-min reminder, 720-min admin alert).
+## Admin Options & Warnings
+Credentials, particularly Twilio SIDs and Tokens, are now centrally managed under the `Admin Options` sheet.
+**WARNING**: These spreadsheet cells are visible to anyone with Editor permissions to the workbook. Tokens are completely abstracted from the frontend REST payloads and cannot be accessed via Developer Tools by Standard users.
 
-### Passed Tests (Verified Locally via Node AST and Mocks)
-- `testStrictSerpentineBoundary`: PASS (verified boundary pausing).
-- `testTransferOfferLocking`: PASS (verified pool lock checks).
-- `testTwilioTokenNonExposure`: PASS (verified API data masking).
-- `testQueueWindowBehavior`: PASS (verified Active assignment queue limits).
-- `testPlaywrightRulesGateway`: PASS (verified mock E2E login intercepted by UI Gateway).
+### Scheduled Notifications
+- Immediate alerts fire on dynamic queue transition outside the `LockService`.
+- 360-minute reminders and 720-minute Administrator alerts map to a dedicated `_processScheduledTimers` apps script trigger using the unique Active timestamp boundary for perfect deduplication.
+- Ensure a 10-15 minute time-driven trigger is configured inside Google Apps Script mapped to `_processScheduledTimers`.
+
+## Playwright Tests
+To verify UI compliance offline:
+```bash
+npm install
+npx playwright test
+```

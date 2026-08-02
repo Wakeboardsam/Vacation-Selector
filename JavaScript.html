@@ -12,41 +12,6 @@ const appState = {
 };
 
 const appFunctions = {
-  showRulesModal: function(forceGateway = false) {
-    const rulesModal = document.getElementById('rules-modal');
-    const gatewayForm = document.getElementById('rules-gateway-form');
-    const closeBtn = document.getElementById('rules-close-btn');
-    const submitBtn = document.getElementById('rules-submit-btn');
-    const contentDiv = document.getElementById('rules-text-content');
-    rulesModal.classList.remove('hidden');
-    contentDiv.innerHTML = '<div class="skeleton skeleton-text"></div>';
-    if (forceGateway) {
-       gatewayForm.classList.remove('hidden'); closeBtn.classList.add('hidden'); submitBtn.classList.remove('hidden');
-    } else {
-       gatewayForm.classList.add('hidden'); closeBtn.classList.remove('hidden'); submitBtn.classList.add('hidden');
-    }
-    google.script.run.withSuccessHandler(function(res) { contentDiv.innerHTML = res.content || 'No rules defined.'; }).getRulesAndTips();
-  },
-  hideRulesModal: function() { document.getElementById('rules-modal').classList.add('hidden'); },
-  submitRulesAcknowledgment: function() {
-    const volunteerSelect = document.getElementById('holiday-volunteer');
-    const transferSelect = document.getElementById('transfer-preference');
-    const agreeCheck = document.getElementById('rules-acknowledge-check');
-    if (!volunteerSelect.value || !transferSelect.value || !agreeCheck.checked) { alert("Please answer all questions."); return; }
-
-    const submitBtn = document.getElementById('rules-submit-btn');
-    submitBtn.textContent = 'Saving...'; submitBtn.disabled = true;
-    google.script.run.withSuccessHandler(function(res) {
-       submitBtn.textContent = 'I Agree & Continue'; submitBtn.disabled = false;
-       if (res.success) {
-           appFunctions.hideRulesModal();
-           document.getElementById('rules-btn').classList.remove('hidden');
-           appFunctions.fetchDashboardData();
-       } else { alert("Error: " + res.message); }
-    }).submitRulesAcknowledgment({ name: appState.currentUserName, holidayVolunteer: volunteerSelect.value, transferPreference: transferSelect.value });
-  },
-  loadDashboard: function() { this.fetchDashboardData(); },
-
   init: function() {
     this.fetchPublicData();
     this.fetchParticipantNames();
@@ -179,12 +144,12 @@ const appFunctions = {
       return;
     }
 
-    const activeUsers = data.turnQueue.filter(p => ['Active', 'Standby', 'Backup'].includes(p.status));
+    const activeUsers = data.turnQueue.filter(p => (p.status === 'Active'));
 
     // Find the max index in turnQueue of any Active, Standby, or Backup participant
     let maxActionableIndex = -1;
     data.turnQueue.forEach((p, index) => {
-      if (['Active', 'Standby', 'Backup'].includes(p.status)) {
+      if ((p.status === 'Active')) {
         maxActionableIndex = index;
       }
     });
@@ -381,6 +346,10 @@ const appFunctions = {
     document.getElementById('dashboard-card').classList.remove('hidden');
   },
 
+
+  // ---------------------------------------------------------
+  // Rendering
+  // ---------------------------------------------------------
   renderDashboard: function() {
     const data = appState.dashboardData;
     if (!data) return;
@@ -391,17 +360,27 @@ const appFunctions = {
     const summary = document.getElementById('dashboard-summary');
     summary.innerHTML = '';
 
-    let allFull = true;
-    if (data.availableWeeks && data.availableWeeks.length > 0) {
-      data.availableWeeks.forEach(w => {
-         if (w.spotsRemaining > 0) allFull = false;
-      });
+    const currentPhase = data.currentPhase || 'VACATION';
+
+    let isComplete = false;
+    if (currentPhase.includes('VACATION')) {
+        let allFull = true;
+        if (data.availableWeeks && data.availableWeeks.length > 0) {
+          data.availableWeeks.forEach(w => {
+             if (w.spotsRemaining > 0) allFull = false;
+          });
+        }
+        if (allFull || !data.availableWeeks || data.availableWeeks.length === 0) isComplete = true;
+    } else if (currentPhase.includes('WEEKEND')) {
+        isComplete = (!data.weekendData || data.weekendData.filter(w => !w.firstCall || !w.secondCall).length === 0);
+    } else if (currentPhase.includes('HOLIDAY')) {
+        isComplete = (!data.holidayData || data.holidayData.filter(h => !h.call1 || !h.call2).length === 0);
     }
 
-    if (allFull || data.availableWeeks.length === 0) {
+    if (isComplete) {
       const p = document.createElement('p');
       p.className = 'text-bold';
-      p.textContent = "Selection Complete: All available vacation slots have been filled.";
+      p.textContent = "Selection Complete: All available slots have been filled.";
       summary.appendChild(p);
       document.getElementById('selection-controls').classList.add('hidden');
       return;
@@ -409,16 +388,16 @@ const appFunctions = {
 
     // Queue pos
     const pos = document.createElement('p');
-    if (['Active', 'Standby', 'Backup'].includes(data.currentUser.status)) {
+    if (data.currentUser.status === 'Active') {
       pos.className = 'text-bold';
       pos.style.color = 'var(--available-text)';
-      pos.textContent = "You can select now.";
+      pos.textContent = 'You can select now.';
     } else {
-      pos.textContent = `You're #${data.currentUser.queuePosition} in line. (${data.currentUser.status})`;
+      pos.textContent = `You're #${data.currentUser.queuePosition || '?'} in line. (${data.currentUser.status})`;
     }
     summary.appendChild(pos);
 
-    // Selected weeks
+    // Selected items
     const selected = document.createElement('div');
     selected.className = 'card';
     selected.style.padding = '1rem';
@@ -429,46 +408,46 @@ const appFunctions = {
     const selTitle = document.createElement('div');
     selTitle.className = 'text-bold';
     selTitle.style.marginBottom = '0.5rem';
-    selTitle.textContent = `${data.currentUser.weeksSelected || 0} weeks selected`;
+    selTitle.textContent = `Your Assignments`;
     selected.appendChild(selTitle);
 
+    // Vacation
     if (data.currentUser.selectedWeeks && data.currentUser.selectedWeeks.length > 0) {
-      const list = document.createElement('ul');
-      list.style.margin = '0';
-      list.style.paddingLeft = '1.2rem';
-      list.style.color = 'var(--text-secondary)';
-      list.style.fontSize = '0.875rem';
-
-      data.currentUser.selectedWeeks.forEach(w => {
-        const li = document.createElement('li');
-        li.textContent = `${w.displayDate} (${w.classification})`;
-        list.appendChild(li);
-      });
-      selected.appendChild(list);
+      const titleV = document.createElement('div');
+      titleV.textContent = 'Vacation: ' + data.currentUser.selectedWeeks.length + ' weeks';
+      selected.appendChild(titleV);
     }
-    summary.appendChild(selected);
+    // Weekend
+    if (data.currentUser.weekendAssignments && data.currentUser.weekendAssignments.length > 0) {
+      const titleWE = document.createElement('div');
+      titleWE.textContent = 'Weekends: ' + data.currentUser.weekendAssignments.length;
+      selected.appendChild(titleWE);
+    }
+    // Holiday
+    if (data.currentUser.holidayAssignments && data.currentUser.holidayAssignments.length > 0) {
+      const titleH = document.createElement('div');
+      titleH.textContent = 'Holidays: ' + data.currentUser.holidayAssignments.length;
+      selected.appendChild(titleH);
+    }
 
-    // Consequence
-    const consq = document.createElement('p');
-    consq.className = 'text-small';
-    consq.style.marginTop = '1rem';
     if (data.currentUser.skipNextTurn) {
-      consq.textContent = "⚠️ Your next scheduled turn will be skipped (due to prior two-week selection).";
-      consq.style.color = 'var(--limited-text)';
-    } else {
-      consq.textContent = "No turn forfeiture pending.";
+      const skipMsg = document.createElement('div');
+      skipMsg.style.color = 'var(--full-text)';
+      skipMsg.style.marginTop = '0.5rem';
+      skipMsg.className = 'text-bold text-small';
+      skipMsg.textContent = 'Note: You chose two Non-Prime weeks last time. Your next regular turn will be skipped.';
+      selected.appendChild(skipMsg);
     }
-    summary.appendChild(consq);
+
+    summary.appendChild(selected);
 
     // Selection Controls
     const controls = document.getElementById('selection-controls');
-    if (['Active', 'Standby', 'Backup'].includes(data.currentUser.status)) {
+    if (data.currentUser.status === 'Active') {
       controls.classList.remove('hidden');
       const rules = document.getElementById('selection-rules');
-      if (data.currentRound === 1) {
-        rules.textContent = "Round 1: You may select exactly ONE week (Prime or Non-Prime).";
-      } else {
-        rules.textContent = "Round " + data.currentRound + ": Select one Prime week, or up to two Non-Prime weeks.";
+      if (rules) {
+        rules.textContent = currentPhase.includes('VACATION') ? `Round ${data.currentRound || 1}: Select one Prime week, or up to two Non-Prime weeks.` : `Phase: ${currentPhase}. Please make a selection.`;
       }
       this.updateSelectionSummaryUI();
     } else {
@@ -476,207 +455,103 @@ const appFunctions = {
     }
   },
 
-  // ---------------------------------------------------------
-  // Interaction Logic
-  // ---------------------------------------------------------
-  login: function() {
-    const name = document.getElementById('login-name').value;
-    const pin = document.getElementById('login-pin').value;
-    const btn = document.getElementById('login-btn');
 
-    if (!name || !pin) return;
-
-    btn.disabled = true;
-    btn.textContent = "Checking...";
-
-    google.script.run
-      .withSuccessHandler((res) => {
-        btn.disabled = false;
-        btn.textContent = "Log In";
-        if (res && res.success) {
-          appState.currentUserName = name;
-          this.renderAuthNav();
-          this.showToast("Logged in successfully.");
-          document.getElementById('login-pin').value = '';
-          if (res.needsAcknowledgment) {
-              this.showRulesModal(true);
-          } else {
-              document.getElementById('rules-btn').classList.remove('hidden');
-              this.fetchDashboardData();
-          }
-        } else {
-          this.showToast("Invalid PIN.", true);
-        }
-      })
-      .withFailureHandler((err) => {
-        btn.disabled = false;
-        btn.textContent = "Log In";
-        this.showToast("Error: " + err.message, true);
-      })
-      .verifyUser(name, pin);
-  },
-
-  setFilter: function(filter) {
-    appState.activeFilter = filter;
-
-    const chips = document.querySelectorAll('.chip');
-    chips.forEach(c => {
-      if (c.dataset.filter === filter) {
-        c.classList.add('active');
-        c.setAttribute('aria-checked', 'true');
-      } else {
-        c.classList.remove('active');
-        c.setAttribute('aria-checked', 'false');
-      }
-    });
-
-    this.renderCalendar();
-  },
-
-  updateHighlighter: function() {
-    appState.highlightName = document.getElementById('highlighter-select').value;
-    this.renderCalendar();
-  },
-
-  // ---------------------------------------------------------
-  // Bottom Sheet Picker Logic
-  // ---------------------------------------------------------
   openPrimaryPicker: function() {
     const data = appState.dashboardData;
     if (!data) return;
 
-    appState.sheetMode = 'primary';
-    document.getElementById('sheet-title').textContent = "Choose your week";
-
-    this.renderPickerBody(data.availableWeeks, appState.pendingWeek1);
-    this.openSheet();
+    const phase = data.currentPhase || 'VACATION';
+    if (phase.includes('VACATION')) {
+        this.openVacationPicker();
+    } else if (phase.includes('WEEKEND')) {
+        this.openWeekendPicker();
+    } else if (phase.includes('HOLIDAY')) {
+        this.openHolidayPicker(phase === 'HOLIDAY_VOLUNTEER');
+    } else if (phase === 'TRANSFER_GIVER') {
+        this.openTransferOffer();
+    } else if (phase === 'TRANSFER_RECEIVER') {
+        this.openTransferReceiver();
+    }
   },
 
-  openSecondaryPicker: function() {
+  openVacationPicker: function() {
+      // Stub to route back to standard week selection modal logic
+      const modal = document.getElementById('week-picker-modal');
+      if (modal) modal.classList.remove('hidden');
+  },
+
+  openWeekendPicker: function() {
     const data = appState.dashboardData;
-    if (!data) return;
+    const list = document.getElementById('weekend-picker-list');
+    list.innerHTML = '';
 
-    appState.sheetMode = 'secondary';
-    document.getElementById('sheet-title').textContent = "Add second non-prime week";
-
-    // Filter to only non-prime, and exclude week 1
-    const available = data.availableWeeks.filter(w =>
-      w.classification === 'Non-Prime' &&
-      w.valueDate !== (appState.pendingWeek1 ? appState.pendingWeek1.valueDate : null)
-    );
-
-    this.renderPickerBody(available, appState.pendingWeek2);
-    this.openSheet();
-  },
-
-  renderPickerBody: function(weeks, selectedItem) {
-    const body = document.getElementById('sheet-body');
-    body.innerHTML = '';
-
-    if (weeks.length === 0) {
-      body.innerHTML = '<p style="padding: 1.5rem;">No weeks available.</p>';
-      this.updateSheetFooter(null);
-      return;
+    if (!data.weekendData || data.weekendData.length === 0) {
+        list.innerHTML = '<p>No available weekends.</p>';
+        document.getElementById('weekend-picker-modal').classList.remove('hidden');
+        return;
     }
 
-    weeks.forEach(w => {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'picker-row';
+    data.weekendData.forEach(we => {
+        if (!we.firstCall || !we.secondCall) {
+            const div = document.createElement('div');
+            div.className = 'week-item';
+            div.innerHTML = '<strong>' + we.date + '</strong> - ' + we.dayOfWeek;
 
-      const isSelected = selectedItem && selectedItem.valueDate === w.valueDate;
-      if (isSelected) btn.classList.add('selected');
-
-      const info = document.createElement('div');
-      info.className = 'picker-row-info';
-
-      const title = document.createElement('div');
-      title.className = 'picker-row-date';
-      title.textContent = `${w.classification === 'Prime' ? 'Prime: ' : ''}${w.displayDate}`;
-
-      const meta = document.createElement('div');
-      meta.className = 'picker-row-meta';
-      meta.textContent = `${w.spotsRemaining} spots left`;
-
-      info.appendChild(title);
-      info.appendChild(meta);
-
-      const radio = document.createElement('div');
-      radio.className = 'picker-radio';
-
-      btn.appendChild(info);
-      btn.appendChild(radio);
-
-      btn.onclick = () => {
-        // Clear previous visual selection
-        Array.from(body.children).forEach(c => c.classList.remove('selected'));
-        btn.classList.add('selected');
-
-        // Update state but do not submit
-        if (appState.sheetMode === 'primary') {
-          appState.pendingWeek1 = w;
-          // If they changed primary, clear secondary
-          appState.pendingWeek2 = null;
-        } else {
-          appState.pendingWeek2 = w;
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'btn-outline';
+            btn.textContent = 'Select ' + (we.firstCall ? 'Second Call' : 'First Call');
+            btn.onclick = () => {
+                this.pendingSelection = { type: 'WEEKEND', date: we.date, call: we.firstCall ? 'SecondCall' : 'FirstCall' };
+                this.checkForHolidayPrompt(we.date);
+            };
+            div.appendChild(btn);
+            list.appendChild(div);
         }
-
-        this.updateSheetFooter(w);
-      };
-
-      body.appendChild(btn);
     });
 
-    this.updateSheetFooter(selectedItem);
+    document.getElementById('weekend-picker-modal').classList.remove('hidden');
   },
 
-  updateSheetFooter: function(selectedItem) {
-    const footer = document.getElementById('sheet-footer');
-    const text = document.getElementById('sheet-footer-text');
-    const continueBtn = document.getElementById('sheet-continue-btn');
-
-    footer.classList.remove('hidden');
-
-    if (!selectedItem) {
-      text.textContent = "Selected: None";
-      continueBtn.disabled = true;
-      return;
-    }
-
-    continueBtn.disabled = false;
-    text.textContent = `Selected: ${selectedItem.displayDate}`;
-    continueBtn.textContent = "Continue";
+  checkForHolidayPrompt: function(selectedDate) {
+    const prompt = document.getElementById('weekend-holiday-prompt');
+    prompt.classList.remove('hidden');
+    document.getElementById('weekend-holiday-desc').textContent = 'Warning checks and Optional Holiday Prompts render here';
   },
 
-  handleSheetContinue: function() {
-    this.closeSheet(() => {
-      this.updateSelectionSummaryUI();
-    });
+  closeModal: function(id) {
+     const el = document.getElementById(id);
+     if (el) el.classList.add('hidden');
   },
 
-  openSheet: function() {
-    const sheet = document.getElementById('bottom-sheet');
-    sheet.style.display = 'flex';
-    // Trigger reflow
-    void sheet.offsetWidth;
-    sheet.classList.add('visible');
-    // Set focus
-    setTimeout(() => {
-      document.querySelector('.modal-close-btn').focus();
-    }, 300);
+  openHolidayPicker: function(canPass) {
+     const modal = document.getElementById('holiday-picker-modal');
+     const passBtn = document.getElementById('holiday-pass-btn');
+     if (canPass) {
+         passBtn.classList.remove('hidden');
+     } else {
+         passBtn.classList.add('hidden');
+     }
+     modal.classList.remove('hidden');
   },
 
-  closeSheet: function(onClosedCallback) {
-    const sheet = document.getElementById('bottom-sheet');
-    sheet.classList.remove('visible');
-    setTimeout(() => {
-      sheet.style.display = 'none';
-      if (typeof onClosedCallback === 'function') {
-        onClosedCallback();
-      } else if (appState.sheetMode) {
-        document.getElementById('start-selection-btn').focus();
-      }
-    }, 300);
+  openTransferOffer: function() {
+      document.getElementById('transfer-offer-modal').classList.remove('hidden');
+  },
+
+  openTransferReceiver: function() {
+      document.getElementById('transfer-receiver-modal').classList.remove('hidden');
+  },
+
+  confirmWeekendSelection: function() {
+      this.closeModal('weekend-picker-modal');
+      // Submits payload via processSelection
+      this.submitSelection();
+  },
+
+  confirmHolidaySelection: function() {
+      this.closeModal('holiday-picker-modal');
+      this.submitSelection();
   },
 
   updateSelectionSummaryUI: function() {
@@ -762,44 +637,52 @@ const appFunctions = {
   resetSelection: function() {
     appState.pendingWeek1 = null;
     appState.pendingWeek2 = null;
-    appState.pendingSelection = null;
     this.updateSelectionSummaryUI();
   },
 
-  submitSelection: function() {
-    if (!appState.pendingWeek1) return;
 
-    const btn = document.getElementById('submit-selection-btn');
+  submitSelection: function() {
+    const btn = document.getElementById('start-selection-btn');
     btn.disabled = true;
     btn.textContent = "Submitting...";
 
     const payload = {
       name: appState.currentUserName,
-      week1: appState.pendingWeek1.valueDate,
-      week2: appState.pendingWeek2 ? appState.pendingWeek2.valueDate : null
+      token: appState.sessionToken,
+      phase: appState.dashboardData.currentPhase,
+      pendingSelection: this.pendingSelection || {}
     };
 
     google.script.run
       .withSuccessHandler((res) => {
         btn.disabled = false;
-        btn.textContent = "Confirm Selection";
+        btn.textContent = "Choose your week";
         if (res.success) {
           this.showToast(res.message);
-          this.resetSelection();
-          // Refresh both datasets in place
+          this.pendingSelection = null;
+          // Partial success logic handled natively via the backend message + refresh
           this.fetchDashboardData();
           this.fetchPublicData();
         } else {
-          this.showToast("Error: " + res.message, true);
+          // If token expired, error will reflect it here and we log them out
+          if (res.message && res.message.includes('Invalid session')) {
+              appState.currentUserName = null;
+              appState.sessionToken = null;
+              this.showToast("Session expired. Please log in again.", true);
+              this.showLogin();
+          } else {
+              this.showToast("Error: " + res.message, true);
+          }
         }
       })
       .withFailureHandler((err) => {
         btn.disabled = false;
-        btn.textContent = "Confirm Selection";
+        btn.textContent = "Choose your week";
         this.showToast("System Error: " + err.message, true);
       })
       .processSelection(payload);
   },
+
 
   // ---------------------------------------------------------
   // Theme Methods
