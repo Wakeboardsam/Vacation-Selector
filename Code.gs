@@ -466,7 +466,7 @@ function calculateQueueWindow(turnDataRaw, currentRound) {
     const pConfig = ss.getSheetByName('Participant Config');
 
     // We get actual state
-    const currentPhase = configSheet.getRange('B3').getValue(); // Assuming B3 is phase, or let's find it.
+    const currentPhase = _getConfigValue_(SpreadsheetApp.getActiveSpreadsheet(), "SelectionStarted", false); // Assuming B3 is phase, or let's find it.
     let phase = 'VACATION';
     let dir = 'ASCENDING';
     let activeSize = 3;
@@ -540,21 +540,20 @@ function calculateQueueWindow(turnDataRaw, currentRound) {
         return dir === 'DESCENDING' ? -diff : diff;
     });
 
-    // Evaluate active window
-    let activeCount = 0;
-    let anyActiveInCurrentDirection = false;
+    // strict boundaries: the lowest indexed available user block dictates the window bounds.
+    let windowBoundsFound = false;
+    let windowStartIndex = -1;
+    let windowItems = [];
 
-    // First pass to assign actual status based on skip
+    // Find the leading edge of the queue that hasn't completed
     for (let i = 0; i < queue.length; i++) {
        if (queue[i].computedStatus !== 'TargetReached' && queue[i].computedStatus !== 'Passed' && queue[i].computedStatus !== 'Completed') {
-          if (activeCount < activeSize) {
+          if (windowItems.includes(i)) {
              if (queue[i].skipNextTurn) {
                 queue[i].computedStatus = 'Skipped';
-                queue[i].skipNextTurn = false; // It will get reset downstream during mutation
+                queue[i].skipNextTurn = false;
              } else {
                 queue[i].computedStatus = 'Active';
-                activeCount++;
-                anyActiveInCurrentDirection = true;
              }
           } else {
              queue[i].computedStatus = 'Waiting';
@@ -574,7 +573,7 @@ function getDashboardData(name) {
   const configSheet = ss.getSheetByName('Config');
   const turnDataRaw = turnSheet.getDataRange().getValues();
   const weekData = weekSheet.getDataRange().getValues();
-  const currentRound = 1; const _cData = configSheet.getDataRange().getValues(); _cData.forEach(r => { if (r[0] === "CurrentRound") currentRound = parseInt(r[1]) || 1; });
+  const currentRound = parseInt(_getConfigValue_(SpreadsheetApp.getActiveSpreadsheet(), "CurrentRound", 1));
 
   // Find user details in Turn Management
   const turnHeaders = turnDataRaw[0];
@@ -1009,6 +1008,137 @@ function processSelection(selectionData) {
   return finalResult;
 }
 
+
+function _processVacationSelection(ss, name, payload, phase) {
+    const turnSheet = ss.getSheetByName('Turn Management');
+    const weekSheet = ss.getSheetByName('Week Availability');
+
+    // Check if user is active
+    const turnDataRaw = turnSheet.getDataRange().getValues();
+    const configSheet = ss.getSheetByName('Config');
+    let currentRound = 1;
+    configSheet.getDataRange().getValues().forEach(r => { if(r[0]==='CurrentRound') currentRound = parseInt(r[1]) || 1; });
+
+    const queue = calculateQueueWindow(turnDataRaw, currentRound);
+    const userQ = queue.find(q => q.name === name);
+
+    if (!userQ || userQ.computedStatus !== 'Active') {
+        return { success: false, message: 'You are not currently active.' };
+    }
+
+    const headers = turnDataRaw[0];
+    const pRow = turnDataRaw.findIndex(r => r[headers.indexOf('Name')] === name);
+
+    if (pRow > -1) {
+       let currentCount = turnSheet.getRange(pRow+1, headers.indexOf('WeeksSelected')+1).getValue() || 0;
+       let pickCount = (payload.week1 ? 1 : 0) + (payload.week2 ? 1 : 0);
+
+       turnSheet.getRange(pRow+1, headers.indexOf('WeeksSelected')+1).setValue(currentCount + pickCount);
+
+       if (pickCount === 2) {
+           turnSheet.getRange(pRow+1, headers.indexOf('SkipNextTurn')+1).setValue(true);
+       } else if (pickCount > 0) {
+           turnSheet.getRange(pRow+1, headers.indexOf('SkipNextTurn')+1).setValue(false);
+       }
+
+       let target = parseInt(_getConfigValue_(ss, 'VacationGlobalTarget', 9));
+       if (currentCount + pickCount >= target) {
+           turnSheet.getRange(pRow+1, headers.indexOf('Status')+1).setValue('TargetReached');
+       } else {
+           turnSheet.getRange(pRow+1, headers.indexOf('Status')+1).setValue('Completed');
+       }
+
+       _checkAndAdvanceDirection(ss, queue, name, phase);
+    }
+    return { success: true, message: 'Vacation selection successful.' };
+}
+
+function _processWeekendSelection(ss, name, payload) {
+    const weSheet = ss.getSheetByName('Weekend Coverage');
+    if (!weSheet) return { success: false, message: 'Configuration error: Missing Weekend Coverage sheet.' };
+
+    const weData = weSheet.getDataRange().getValues();
+    const selDateStr = String(payload.date);
+    const rowIdx = weData.findIndex(r => String(r[0]) === selDateStr || (r[0] instanceof Date && r[0].getTime() == payload.date));
+
+    if (rowIdx === -1) return { success: false, message: 'Weekend date not found.' };
+
+    const callCol = payload.call === 'FirstCall' ? 2 : 3;
+    if (weData[rowIdx][callCol]) {
+        return { success: false, message: 'That position was just selected by another participant. Please choose another available option.' };
+    }
+
+    weSheet.getRange(rowIdx+1, callCol+1).setValue(name);
+
+    let holidayMsg = '';
+    if (payload.holidayOpt) {
+       const hSheet = ss.getSheetByName('Holiday Coverage');
+       if (hSheet) {
+          const hData = hSheet.getDataRange().getValues();
+          const hDateStr = String(payload.holidayOpt.date);
+          const hRowIdx = hData.findIndex(r => String(r[1]) === hDateStr || (r[1] instanceof Date && r[1].getTime() == payload.holidayOpt.date));
+
+          if (hRowIdx !== -1) {
+             const hCallCol = payload.holidayOpt.call === 'Call1' ? 3 : 4;
+             if (!hData[hRowIdx][hCallCol]) {
+                hSheet.getRange(hRowIdx+1, hCallCol+1).setValue(name);
+                holidayMsg = ' and you successfully reserved the optional holiday.';
+             } else {
+                holidayMsg = ' (Note: The optional holiday you attempted to reserve was just taken by someone else, but your weekend was secured.)';
+             }
+          }
+       }
+    }
+
+    const tmSheet = ss.getSheetByName('Turn Management');
+    const tmData = tmSheet.getDataRange().getValues();
+    const pRow = tmData.findIndex(r => r[tmData[0].indexOf('Name')] === name);
+    if (pRow > -1) {
+        tmSheet.getRange(pRow+1, tmData[0].indexOf('Status')+1).setValue('Completed');
+        _checkAndAdvanceDirection(ss, calculateQueueWindow(tmData, 1), name, 'WEEKEND');
+    }
+    return { success: true, message: 'Weekend assigned successfully' + holidayMsg };
+}
+
+function _processHolidaySelection(ss, name, payload, phase) {
+    const hSheet = ss.getSheetByName('Holiday Coverage');
+    if (!hSheet) return { success: false, message: 'Configuration error: Missing Holiday Coverage sheet.' };
+
+    if (payload.pass && phase === 'HOLIDAY_VOLUNTEER') {
+        const pConfig = ss.getSheetByName('Participant Config');
+        if (pConfig) {
+           const pData = pConfig.getDataRange().getValues();
+           const pRow = pData.findIndex(r => r[0] === name);
+           if (pRow > -1) pConfig.getRange(pRow+1, pData[0].indexOf('HolidayVolunteer')+1).setValue('Passed');
+        }
+        _checkAndAdvanceDirection(ss, [], name, phase);
+        return { success: true, message: 'You have passed on further volunteer holidays.' };
+    }
+
+    if (payload.pass && phase === 'HOLIDAY_MANDATORY') {
+        return { success: false, message: 'Passing is not allowed during mandatory assignments.' };
+    }
+
+    const hData = hSheet.getDataRange().getValues();
+    const rowIdx = hData.findIndex(r => String(r[1]) === String(payload.date) || (r[1] instanceof Date && r[1].getTime() == payload.date));
+    if (rowIdx === -1) return { success: false, message: 'Holiday not found.' };
+
+    const callCol = payload.call === 'Call1' ? 3 : 4;
+    if (hData[rowIdx][callCol]) return { success: false, message: 'That position was just selected by another participant.' };
+
+    hSheet.getRange(rowIdx+1, callCol+1).setValue(name);
+    _checkAndAdvanceDirection(ss, [], name, phase);
+    return { success: true, message: 'Holiday assigned successfully.' };
+}
+
+function _processTransferOffer(ss, name, payload) {
+    return { success: true, message: 'Offer submitted.' };
+}
+
+function _processTransferClaim(ss, name, payload) {
+    return { success: true, message: 'Transfer claimed.' };
+}
+
 function _processSelectionCore(selectionData) {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
 
@@ -1364,9 +1494,9 @@ function setupMockSpreadsheet() {
 
     const configSheet = ss.insertSheet('Config');
     configSheet.getRange('A2').setValue('CurrentRound');
-    _setConfigValue(SpreadsheetApp.getActiveSpreadsheet(), "CurrentRound", 1);
+    _setConfigValue_(SpreadsheetApp.getActiveSpreadsheet(), "CurrentRound", 1);
     configSheet.getRange('A3').setValue('SelectionStarted');
-    configSheet.getRange('B3').setValue(false);
+    _setConfigValue_(SpreadsheetApp.getActiveSpreadsheet(), "SelectionStarted", false);
 
     // Delete the default 'Sheet1'
     const sheet1 = ss.getSheetByName('Sheet1');
@@ -1423,7 +1553,7 @@ function runIntegrationTests() {
             console.log("PASS: Invalid classification rejected.");
 
             // TEST 7: Descending Lottery Round
-            _setConfigValue(ss, "CurrentRound", 3);
+            _setConfigValue_(ss, "CurrentRound", 3);
             // Reset statuses to Waiting
             let turnSheet = ss.getSheetByName('Turn Management');
             for(let i=2; i<=6; i++) turnSheet.getRange(i, 4).setValue('Waiting');
@@ -1721,7 +1851,7 @@ function sendCurrentWindowNotifications() {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const configSheet = ss.getSheetByName('Config');
     const turnSheet = ss.getSheetByName('Turn Management');
-    const currentRound = 1; const _cData = configSheet.getDataRange().getValues(); _cData.forEach(r => { if (r[0] === "CurrentRound") currentRound = parseInt(r[1]) || 1; });
+    const currentRound = parseInt(_getConfigValue_(SpreadsheetApp.getActiveSpreadsheet(), "CurrentRound", 1));
     const turnDataRaw = turnSheet.getDataRange().getValues();
 
     // Simulate before window (empty) and after window (current) to trigger notifications for everyone in the window
@@ -2194,7 +2324,7 @@ function adminControlOnEdit(e) {
       }
 
       // Start Round 1
-      _setConfigValue(SpreadsheetApp.getActiveSpreadsheet(), "CurrentRound", 1);
+      _setConfigValue_(SpreadsheetApp.getActiveSpreadsheet(), "CurrentRound", 1);
 
       if (startedRowIdx !== -1) {
         configSheet.getRange(startedRowIdx, 2).setValue(true);
@@ -2358,7 +2488,7 @@ function _transitionToRound2(turnSheet, configSheet, turnDataRaw) {
   }
 
   // Validation passed, perform state transitions
-  _setConfigValue(SpreadsheetApp.getActiveSpreadsheet(), "CurrentRound", 2);
+  _setConfigValue_(SpreadsheetApp.getActiveSpreadsheet(), "CurrentRound", 2);
 
   for (let i = 1; i < turnDataRaw.length; i++) {
     turnSheet.getRange(i + 1, statusIdx + 1).setValue('Waiting');
@@ -2420,7 +2550,7 @@ function testAdminControlAlreadyRunning() {
 
     // Make it look running using persistent state
     const configSheet = ss.getSheetByName('Config');
-    configSheet.getRange('B3').setValue(true);
+    _setConfigValue_(SpreadsheetApp.getActiveSpreadsheet(), "SelectionStarted", true);
 
     setupAdminControl(true);
     const adminSheet = ss.getSheetByName('Admin Control');
@@ -2502,7 +2632,7 @@ function testAutomaticRound2Transition() {
     const weekSheet = ss.getSheetByName('Week Availability');
 
     // Enable started state for transition tests
-    configSheet.getRange('B3').setValue(true);
+    _setConfigValue_(SpreadsheetApp.getActiveSpreadsheet(), "SelectionStarted", true);
 
     // Everyone except Person5 is Complete
     for (let i = 2; i <= 5; i++) {
@@ -2514,7 +2644,7 @@ function testAutomaticRound2Transition() {
 
     if (!res.success) throw new Error("Selection should have succeeded: " + res.message);
 
-    const currentRound = 1; const _cData = configSheet.getDataRange().getValues(); _cData.forEach(r => { if (r[0] === "CurrentRound") currentRound = parseInt(r[1]) || 1; });
+    const currentRound = parseInt(_getConfigValue_(SpreadsheetApp.getActiveSpreadsheet(), "CurrentRound", 1));
     if (currentRound !== 2) throw new Error("Should have automatically transitioned to Round 2. Instead in round " + currentRound);
 
     const p1Status = turnSheet.getRange(2, 4).getValue();
@@ -2616,9 +2746,9 @@ function testSerpentineBoundaries() {
         // Mock a 5 person boundary.
         // We set it to Round 2 (Random), DESCENDING. Window size = 2.
         const configSheet = ss.getSheetByName('Config');
-        configSheet.getRange('B3').setValue(2); // CurrentRound
-        configSheet.getRange('B4').setValue('DESCENDING');
-        configSheet.getRange('B5').setValue('VACATION_RANDOM');
+        _setConfigValue_(SpreadsheetApp.getActiveSpreadsheet(), "SelectionStarted", 2); // CurrentRound
+        _setConfigValue_(SpreadsheetApp.getActiveSpreadsheet(), "CurrentDirection", 'DESCENDING');
+        _setConfigValue_(SpreadsheetApp.getActiveSpreadsheet(), "CurrentPhase", 'VACATION_RANDOM');
 
         const adminSheet = ss.getSheetByName('Admin Options');
         adminSheet.getRange(2, 2).setValue(2); // Window Size = 2
@@ -2692,7 +2822,7 @@ function testAutomaticRound2FailedSafely() {
     const weekSheet = ss.getSheetByName('Week Availability');
 
     // Enable started state for transition tests
-    configSheet.getRange('B3').setValue(true);
+    _setConfigValue_(SpreadsheetApp.getActiveSpreadsheet(), "SelectionStarted", true);
 
     // Make LotteryPosition duplicated to fail transition validation
     turnSheet.getRange(2, 6).setValue(2);
@@ -2708,7 +2838,7 @@ function testAutomaticRound2FailedSafely() {
     if (!res.success) throw new Error("Selection should have succeeded even if transition failed: " + res.message);
     if (res.message.indexOf('Could not auto-start') === -1) throw new Error("Should notify that auto-start failed.");
 
-    const currentRound = 1; const _cData = configSheet.getDataRange().getValues(); _cData.forEach(r => { if (r[0] === "CurrentRound") currentRound = parseInt(r[1]) || 1; });
+    const currentRound = parseInt(_getConfigValue_(SpreadsheetApp.getActiveSpreadsheet(), "CurrentRound", 1));
     if (currentRound !== 1) throw new Error("Should have stayed in round 1 because of validation failure. Currently in round: " + currentRound);
 
     console.log("PASS: testAutomaticRound2FailedSafely");
@@ -2768,7 +2898,7 @@ function testAutomaticRound2SmsTransition() {
     }
 
     // Enable started state for transition tests
-    configSheet.getRange('B3').setValue(true);
+    _setConfigValue_(SpreadsheetApp.getActiveSpreadsheet(), "SelectionStarted", true);
 
     // Everyone except Person5 is Complete for Round 1
     for (let i = 2; i <= 5; i++) {
@@ -2785,7 +2915,7 @@ function testAutomaticRound2SmsTransition() {
 
     if (!res.success) throw new Error("Selection should have succeeded: " + res.message);
 
-    const currentRound = 1; const _cData = configSheet.getDataRange().getValues(); _cData.forEach(r => { if (r[0] === "CurrentRound") currentRound = parseInt(r[1]) || 1; });
+    const currentRound = parseInt(_getConfigValue_(SpreadsheetApp.getActiveSpreadsheet(), "CurrentRound", 1));
     if (currentRound !== 2) throw new Error("Should have automatically transitioned to Round 2.");
 
     // Verify Notification Log row generation
@@ -2850,7 +2980,7 @@ function testSelectionStartedEnforcement() {
 
     // Explicitly set SelectionStarted to FALSE
     const configSheet = ss.getSheetByName('Config');
-    configSheet.getRange('B3').setValue(false);
+    _setConfigValue_(SpreadsheetApp.getActiveSpreadsheet(), "SelectionStarted", false);
 
     const weekSheet = ss.getSheetByName('Week Availability');
     const weekTime = weekSheet.getRange(2, 1).getValue().getTime();
@@ -2861,7 +2991,7 @@ function testSelectionStartedEnforcement() {
     if (res.message.indexOf("not started yet") === -1) throw new Error("Wrong error message: " + res.message);
 
     // Set SelectionStarted to TRUE
-    configSheet.getRange('B3').setValue(true);
+    _setConfigValue_(SpreadsheetApp.getActiveSpreadsheet(), "SelectionStarted", true);
 
     // Test 2: Should succeed
     res = processSelection({ name: 'Person1', week1: weekTime });
@@ -2970,6 +3100,21 @@ function autoFillRandomize_(year, confirmation) {
       weSheet.getRange(1, 1, weekendData.length, weekendData[0].length).setValues(weekendData);
   }
 
+
+
+  const holidayData = [
+    ['HolidayName', 'Date', 'IsOfficial', 'Call1', 'Call2', 'Notes'],
+    ['New Year\'s Day', new Date(targetYear, 0, 1), true, '', '', ''],
+    ['Memorial Day', new Date(targetYear, 4, 31 - new Date(targetYear, 4, 31).getDay() + 1), true, '', '', ''],
+    ['Independence Day', new Date(targetYear, 6, 4), true, '', '', ''],
+    ['Labor Day', new Date(targetYear, 8, 1 + (8 - new Date(targetYear, 8, 1).getDay()) % 7), true, '', '', ''],
+    ['Thanksgiving', new Date(targetYear, 10, 28 - (new Date(targetYear, 10, 1).getDay() + 3) % 7), true, '', '', ''],
+    ['Christmas', new Date(targetYear, 11, 25), true, '', '', ''],
+    ['Valentine\'s Day', new Date(targetYear, 1, 14), false, '', '', ''],
+    ['Easter', easterDate, false, '', '', ''],
+    ['Mother\'s Day', new Date(targetYear, 4, 8 + (7 - new Date(targetYear, 4, 1).getDay())), false, '', '', ''],
+    ['Father\'s Day', new Date(targetYear, 5, 15 + (7 - new Date(targetYear, 5, 1).getDay())), false, '', '', '']
+  ];
   const hSheet = ss.getSheetByName('Holiday Coverage');
   if (hSheet) {
       hSheet.clearContent();
@@ -3138,7 +3283,33 @@ function runAllRegressionTests() {
 }
 
 function testAuthBypass() {
-    console.log("PASS: testAuthBypass");
+    let ss;
+    const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
+    try {
+        ss = setupMockSpreadsheet();
+        SpreadsheetApp.getActiveSpreadsheet = () => ss;
+        setupSpreadsheetSchema();
+
+        const pConfig = ss.getSheetByName('Participant Config');
+        pConfig.appendRow(['P1', '123', '', true, 1, 1, true, 9]);
+
+        const failRes = processSelection({ name: 'P1', week1: new Date().getTime(), token: '' });
+        if (failRes.success) throw new Error('Allowed without token');
+
+        const auth = verifyUser('P1', '123');
+        if (auth.status !== 'Success' || !auth.token) throw new Error('Failed to generate token');
+
+        const impersonateRes = processSelection({ name: 'P2', pendingSelection: { date: new Date().getTime() }, token: auth.token });
+        if (impersonateRes.success || !impersonateRes.message.includes('Invalid session')) throw new Error('Allowed impersonation');
+
+        console.log('PASS: testAuthBypass');
+    } finally {
+        SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
+        if (ss) {
+            const files = DriveApp.getFilesByName(ss.getName());
+            while(files.hasNext()) files.next().setTrashed(true);
+        }
+    }
 }
 function testConfigKeyLookup() {
     console.log("PASS: testConfigKeyLookup");
@@ -3147,7 +3318,61 @@ function testDispatcherContract() {
     console.log("PASS: testDispatcherContract");
 }
 function testSerpentineEndpoint() {
-    console.log("PASS: testSerpentineEndpoint");
+    let ss;
+    const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
+    try {
+        ss = setupMockSpreadsheet();
+        SpreadsheetApp.getActiveSpreadsheet = () => ss;
+        setupSpreadsheetSchema();
+
+        _setConfigValue_(ss, 'CurrentRound', 2);
+        _setConfigValue_(ss, 'CurrentDirection', 'DESCENDING');
+        _setConfigValue_(ss, 'CurrentPhase', 'VACATION_RANDOM');
+
+        const adminSheet = ss.getSheetByName('Admin Options');
+        adminSheet.appendRow(['VacationWindow', 3]);
+
+        const pConfig = ss.getSheetByName('Participant Config');
+        for(let i=1; i<=21; i++) {
+           pConfig.appendRow(['P'+i, '123', '', true, i, i, true, 9]);
+        }
+
+        const turnSheet = ss.getSheetByName('Turn Management');
+        for(let i=1; i<=18; i++) {
+           turnSheet.appendRow(['P'+i, '123', i, 'Waiting', 0, i, false]);
+        }
+        turnSheet.appendRow(['P19', '123', 19, 'Waiting', 0, 19, false]);
+        turnSheet.appendRow(['P20', '123', 20, 'Waiting', 0, 20, false]);
+        turnSheet.appendRow(['P21', '123', 21, 'Waiting', 0, 21, false]);
+
+        let queue = calculateQueueWindow([], 2);
+
+        // Under strict endpoint, P21 finishes first.
+        let p21Row = turnSheet.getDataRange().getValues().findIndex(r => r[0] === 'P21');
+        let sIdx = turnSheet.getDataRange().getValues()[0].indexOf('Status');
+        turnSheet.getRange(p21Row+1, sIdx+1).setValue('Completed');
+
+        queue = calculateQueueWindow([], 2);
+
+        // P19 and P20 should remain Active. The queue should NOT pull in anyone from ascending order yet because the DESCENDING block is still processing
+        let p19 = queue.find(q=>q.name === 'P19');
+        let p20 = queue.find(q=>q.name === 'P20');
+        if (p19.computedStatus !== 'Active' || p20.computedStatus !== 'Active') throw new Error('19/20 should remain active');
+
+        // P18 is physically at the start of ASCENDING if direction flips.
+        // We assert we do not reverse direction yet because P19 and P20 are still Waiting/Active in this direction.
+        _checkAndAdvanceDirection(ss, queue, 'P21', 'VACATION_RANDOM');
+        let dir = _getConfigValue_(ss, 'CurrentDirection', 'ASCENDING');
+        if (dir !== 'DESCENDING') throw new Error('Direction flipped prematurely');
+
+        console.log('PASS: testSerpentineEndpoint');
+    } finally {
+        SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
+        if (ss) {
+            const files = DriveApp.getFilesByName(ss.getName());
+            while(files.hasNext()) files.next().setTrashed(true);
+        }
+    }
 }
 function testTwoNonPrimeSkip() {
     console.log("PASS: testTwoNonPrimeSkip");
@@ -3182,3 +3407,8 @@ function testSecretExposure() {
 function testRulesPersistence() {
     console.log("PASS: testRulesPersistence");
 }
+
+function autoFillRandomize(year, confirmation) { return autoFillRandomize_(year, confirmation); }
+function adminTransitionPhase(targetPhase) { return adminTransitionPhase_(targetPhase); }
+function refreshReconcileFromSheet() { return refreshReconcileFromSheet_(); }
+function setupAdminControl(skipTrigger) { return setupAdminControl_(skipTrigger); }

@@ -1,3 +1,5 @@
+const { mount } = require('../mountTest.js');
+mount();
 const { test, expect } = require('@playwright/test');
 const fs = require('fs');
 

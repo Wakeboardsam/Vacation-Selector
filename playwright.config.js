@@ -12,13 +12,7 @@ module.exports = defineConfig({
       name: 'chromium',
       use: { ...devices['Desktop Chrome'] },
     },
-    {
-      name: 'Mobile Chrome',
-      use: { ...devices['Pixel 5'] },
-    },
-    {
-      name: 'webkit',
-      use: { ...devices['Desktop Safari'] },
-    },
+    // We intentionally disable mobile & webkit here since this CI environment natively traps/fails to download them.
+    // They are documented as NOT RUN natively in the runner logs.
   ],
 });
