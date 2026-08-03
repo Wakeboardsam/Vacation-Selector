@@ -12,6 +12,57 @@ const appState = {
 };
 
 const appFunctions = {
+
+  login: function() {
+    const name = document.getElementById('login-name').value;
+    const pin = document.getElementById('login-pin').value;
+    const btn = document.getElementById('login-btn');
+
+    if (!name || !pin) return;
+
+    btn.disabled = true;
+    btn.textContent = 'Checking...';
+
+    google.script.run
+      .withSuccessHandler((res) => {
+        btn.disabled = false;
+        btn.textContent = 'Log In';
+        if (res.status === 'Success') {
+          appState.currentUserName = name;
+          appState.sessionToken = res.token;
+
+          document.getElementById('login-pin').value = '';
+          this.renderAuthNav();
+          this.showRulesGateway(); // Always show rules gateway upon valid login per requirements
+        } else {
+          this.showToast(res.status || 'Invalid PIN.', true);
+        }
+      })
+      .withFailureHandler((err) => {
+        btn.disabled = false;
+        btn.textContent = 'Log In';
+        this.showToast('Error: ' + err.message, true);
+      })
+      .verifyUser(name, pin);
+  },
+
+  showRulesGateway: function() {
+    document.getElementById('login-card').classList.add('hidden');
+    document.getElementById('rules-gateway').classList.remove('hidden');
+    // Fetch rules content
+    google.script.run.withSuccessHandler((res) => {
+        const rulesList = document.getElementById('rules-list');
+        if (rulesList && res.rules) {
+            rulesList.innerHTML = '';
+            res.rules.forEach(r => {
+                const li = document.createElement('li');
+                li.textContent = r;
+                rulesList.appendChild(li);
+            });
+        }
+    }).getRulesAndTips();
+  },
+
   init: function() {
     this.fetchPublicData();
     this.fetchParticipantNames();
@@ -641,15 +692,18 @@ const appFunctions = {
   },
 
 
+
   submitSelection: function() {
     const btn = document.getElementById('start-selection-btn');
     btn.disabled = true;
     btn.textContent = "Submitting...";
 
+    const currentPhase = (appState.dashboardData && appState.dashboardData.currentPhase) ? appState.dashboardData.currentPhase : 'VACATION';
+
     const payload = {
       name: appState.currentUserName,
       token: appState.sessionToken,
-      phase: appState.dashboardData.currentPhase,
+      phase: currentPhase,
       pendingSelection: this.pendingSelection || {}
     };
 
@@ -660,11 +714,9 @@ const appFunctions = {
         if (res.success) {
           this.showToast(res.message);
           this.pendingSelection = null;
-          // Partial success logic handled natively via the backend message + refresh
           this.fetchDashboardData();
           this.fetchPublicData();
         } else {
-          // If token expired, error will reflect it here and we log them out
           if (res.message && res.message.includes('Invalid session')) {
               appState.currentUserName = null;
               appState.sessionToken = null;
@@ -682,6 +734,7 @@ const appFunctions = {
       })
       .processSelection(payload);
   },
+
 
 
   // ---------------------------------------------------------

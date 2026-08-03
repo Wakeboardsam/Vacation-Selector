@@ -1,85 +1,124 @@
 const { test, expect } = require('@playwright/test');
+const fs = require('fs');
 
-test('Mock Rules Gateway Intercept', async ({ page }) => {
-  await page.setContent(`
-    <!DOCTYPE html>
-    <html>
-      <body>
-         <div id="rules-gateway" style="display:block;">
-            <h1>Rules and Tips</h1>
-            <form id="rules-form">
-                <select required id="volunteer-select"><option value="yes">Yes</option></select>
-                <select required id="transfer-select"><option value="none">None</option></select>
-                <button id="accept-btn">Accept</button>
-            </form>
-         </div>
-         <div id="dashboard" style="display:none;">
-            <h1>Dashboard</h1>
-         </div>
-         <script>
-            document.getElementById('accept-btn').addEventListener('click', (e) => {
-                e.preventDefault();
-                document.getElementById('rules-gateway').style.display = 'none';
-                document.getElementById('dashboard').style.display = 'block';
-            });
-         </script>
-      </body>
-    </html>
-  `);
+test('Application Boot, Login, and Rules Gateway Routing', async ({ page }) => {
+    let rawHtml = fs.readFileSync('tests/merged.html', 'utf8');
 
-  await expect(page.locator('#rules-gateway')).toBeVisible();
-  await expect(page.locator('#dashboard')).toBeHidden();
+    const scriptMock = `
+      <script>
+         window.google = {
+             script: {
+                 run: {
+                     withSuccessHandler: function(cb) { this.successCb = cb; return this; },
+                     withFailureHandler: function(cb) { this.failureCb = cb; return this; },
+                     verifyUser: function(name, pin) {
+                         setTimeout(() => {
+                             if (name === 'TestUser' && pin === '1234') {
+                                 this.successCb({ status: 'Success', token: 'mock-token-123' });
+                             } else {
+                                 this.successCb({ status: 'Invalid PIN' });
+                             }
+                         }, 50);
+                     },
+                     getRulesAndTips: function() {
+                         setTimeout(() => { this.successCb({ rules: ['Rule 1', 'Rule 2'], tips: [] }); }, 50);
+                     },
+                     getPublicCalendarData: function() {
+                         setTimeout(() => { this.successCb({ calendarData: [], weekendData: [], holidayData: [], turnQueue: [], currentRound: 1, currentPhase: 'SETUP' }); }, 50);
+                     },
+                     getDashboardData: function() {
+                         setTimeout(() => {
+                             this.successCb({
+                                currentUser: { name: 'TestUser', status: 'Active', weeksSelectedCount: 0, selectedWeeks: [] },
+                                currentPhase: 'VACATION_RANDOM',
+                                currentRound: 2
+                             });
+                         }, 50);
+                     },
+                     submitRulesAcknowledgment: function() {
+                         setTimeout(() => { this.successCb({ success: true }); }, 50);
+                     },
+                     processSelection: function(payload) {
+                         setTimeout(() => {
+                             if (payload.token === 'mock-token-123') {
+                                 this.successCb({ success: true, message: 'Vacation selection successful.' });
+                             } else {
+                                 this.successCb({ success: false, message: 'Invalid session.' });
+                             }
+                         }, 50);
+                     }
+                 }
+             }
+         };
+      </script>
+    `;
+    rawHtml = rawHtml.replace('</body>', scriptMock + '</body>');
+    await page.setContent(rawHtml);
 
-  await page.locator('#accept-btn').click();
+    // Login -> Rules -> Dashboard
+    await page.waitForSelector('#login-form');
+    await page.evaluate(() => {
+        const sel = document.getElementById('login-name');
+        const opt = document.createElement('option');
+        opt.value = 'TestUser'; opt.text = 'TestUser';
+        sel.appendChild(opt);
+    });
 
-  await expect(page.locator('#rules-gateway')).toBeHidden();
-  await expect(page.locator('#dashboard')).toBeVisible();
+    await page.selectOption('#login-name', 'TestUser');
+    await page.fill('#login-pin', '1234');
+    await page.click('#login-btn');
+
+    await expect(page.locator('#rules-gateway')).toBeVisible();
+    await page.selectOption('#volunteer-select', 'yes');
+    await page.selectOption('#transfer-select', 'both');
+    await page.click('#accept-btn');
+
+    await expect(page.locator('#dashboard-card')).toBeVisible();
+    await expect(page.locator('#dashboard-welcome')).toBeVisible();
+
+    // Check Controls Visibility
+    await expect(page.locator('#selection-controls')).toBeVisible();
+    await expect(page.locator('#start-selection-btn')).toBeVisible();
+
+    // Simulate Vacation Selection Click
+    await page.click('#start-selection-btn');
+
 });
 
 test('Session Expiration UI Gracefully Reverts', async ({ page }) => {
-   await page.setContent(`
-    <!DOCTYPE html>
-    <html>
-      <body>
-         <div id="login-card" style="display:none;"><h2>Login</h2></div>
-         <div id="dashboard-card" style="display:block;">
-            <button id="submit-btn">Submit Pick</button>
-            <div id="toast" style="display:none;"></div>
-         </div>
-         <script>
-            document.getElementById('submit-btn').addEventListener('click', () => {
-               // mock expiration
-               document.getElementById('toast').innerText = 'Session expired. Please log in again.';
-               document.getElementById('toast').style.display = 'block';
-               document.getElementById('dashboard-card').style.display = 'none';
-               document.getElementById('login-card').style.display = 'block';
-            });
-         </script>
-      </body>
-    </html>
-  `);
+    let rawHtml = fs.readFileSync('tests/merged.html', 'utf8');
+    const scriptMock = `
+      <script>
+         window.google = { script: { run: {
+             withSuccessHandler: function(cb) { this.successCb = cb; return this; },
+             withFailureHandler: function(cb) { this.failureCb = cb; return this; },
+             getPublicCalendarData: function() { this.successCb({ calendarData: [], turnQueue: [] }); },
+             processSelection: function() {
+                 setTimeout(() => { this.successCb({ success: false, message: 'Invalid session' }); }, 50);
+             }
+         }}};
+      </script>
+    `;
+    rawHtml = rawHtml.replace('</body>', scriptMock + '</body>');
+    await page.setContent(rawHtml);
 
-  await expect(page.locator('#dashboard-card')).toBeVisible();
-  await page.locator('#submit-btn').click();
-  await expect(page.locator('#toast')).toHaveText('Session expired. Please log in again.');
-  await expect(page.locator('#login-card')).toBeVisible();
-});
+    // Inject mock state explicitly
+    await page.evaluate(() => {
+        window.appState = {
+            dashboardData: { currentPhase: 'VACATION', currentUser: { status: 'Active' } },
+            currentUserName: 'TestUser',
+            sessionToken: 'bad-token',
+            dashboardData: { currentPhase: 'VACATION', currentUser: { status: 'Active' } }
+        };
+        document.getElementById('login-card').classList.add('hidden');
+        document.getElementById('dashboard-card').classList.remove('hidden');
+    });
 
-test('Weekend Warning Advisory Visibility', async ({ page }) => {
-   await page.setContent(`
-    <!DOCTYPE html>
-    <html>
-      <body>
-         <div id="weekend-picker-modal" class="modal">
-            <div id="weekend-picker-warnings">Advisory: Adjacent to Vacation</div>
-            <button id="weekend-confirm-btn">Select</button>
-         </div>
-      </body>
-    </html>
-  `);
+    await expect(page.locator('#dashboard-card')).toBeVisible();
+    // Use the native submit
+    await page.evaluate(() => { window.appFunctions.submitSelection(); });
 
-  await expect(page.locator('#weekend-picker-warnings')).toBeVisible();
-  await expect(page.locator('#weekend-picker-warnings')).toHaveText('Advisory: Adjacent to Vacation');
-  // Confirm button must remain enabled
-  await expect(page.locator('#weekend-confirm-btn')).toBeEnabled();
+    await expect(page.locator('#toast-container')).toBeVisible();
+    await expect(page.locator('#toast-container')).toContainText('Session expired');
+    await expect(page.locator('#login-card')).not.toHaveClass(/hidden/);
 });

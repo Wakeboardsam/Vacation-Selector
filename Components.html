@@ -52,6 +52,43 @@
       </form>
     </div>
 
+
+    <!-- Rules Gateway Area (Hidden by default) -->
+    <div id="rules-gateway" class="card hidden">
+      <h2>Rules and Tips</h2>
+      <p class="text-small text-secondary">Please review and acknowledge the rules for this year.</p>
+
+      <div style="background: var(--surface-main); padding: 1rem; border-radius: 8px; border: 1px solid var(--skeleton-bg); margin-bottom: 1rem;">
+         <ul id="rules-list" style="margin: 0; padding-left: 1.5rem; text-align: left;">
+            <li>Loading...</li>
+         </ul>
+      </div>
+
+      <form id="rules-form" onsubmit="event.preventDefault(); window.appFunctions.submitRules();" style="text-align: left;">
+        <div style="margin-bottom: 1rem;">
+           <label class="text-bold" for="volunteer-select" style="display:block; margin-bottom: 0.5rem;">I am willing to volunteer for one or more official holiday call positions this year.</label>
+           <select required id="volunteer-select" style="width: 100%; padding: 0.75rem; border-radius: 8px; border: 1px solid var(--skeleton-bg);">
+             <option value="" disabled selected>-- Select Yes/No --</option>
+             <option value="yes">Yes</option>
+             <option value="no">No</option>
+           </select>
+        </div>
+
+        <div style="margin-bottom: 1.5rem;">
+           <label class="text-bold" for="transfer-select" style="display:block; margin-bottom: 0.5rem;">Transfer/Giveaway Preference:</label>
+           <select required id="transfer-select" style="width: 100%; padding: 0.75rem; border-radius: 8px; border: 1px solid var(--skeleton-bg);">
+             <option value="" disabled selected>-- Select Preference --</option>
+             <option value="offer">Offer assignments</option>
+             <option value="receive">Receive assignments</option>
+             <option value="both">Both offer and receive</option>
+             <option value="none">Do not participate</option>
+           </select>
+        </div>
+
+        <button type="submit" id="accept-btn" style="width: 100%;">Acknowledge and Continue</button>
+      </form>
+    </div>
+
     <!-- Dashboard Area (Hidden by default) -->
     <div id="dashboard-card" class="card hidden">
       <h2 id="dashboard-welcome">Welcome</h2>
