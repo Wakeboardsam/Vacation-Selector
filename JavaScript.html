@@ -411,7 +411,7 @@ const appFunctions = {
     const summary = document.getElementById('dashboard-summary');
     summary.innerHTML = '';
 
-    const currentPhase = data.currentPhase || 'VACATION';
+    const currentPhase = data.currentPhase || "SETUP";
 
     let isComplete = false;
     if (currentPhase.includes('VACATION')) {
@@ -511,7 +511,7 @@ const appFunctions = {
     const data = appState.dashboardData;
     if (!data) return;
 
-    const phase = data.currentPhase || 'VACATION';
+    const phase = data.currentPhase || "SETUP";
     if (phase.includes('VACATION')) {
         this.openVacationPicker();
     } else if (phase.includes('WEEKEND')) {

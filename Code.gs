@@ -401,6 +401,31 @@ function verifyUser(name, pin) {
   return { status: 'Invalid PIN' };
 }
 
+function _getConfigValue_(ss, key, fallback) {
+    const configSheet = ss.getSheetByName('Config');
+    if (!configSheet) return fallback;
+    const data = configSheet.getDataRange().getValues();
+    for (let i = 0; i < data.length; i++) {
+        if (data[i][0] === key) return data[i][1] !== '' ? data[i][1] : fallback;
+    }
+    return fallback;
+}
+
+function _setConfigValue_(ss, key, val) {
+    const configSheet = ss.getSheetByName('Config');
+    if (!configSheet) return;
+    const data = configSheet.getDataRange().getValues();
+    let rowIdx = -1;
+    for (let i = 0; i < data.length; i++) {
+        if(data[i][0] === key) { rowIdx = i+1; break; }
+    }
+    if (rowIdx > -1) {
+        configSheet.getRange(rowIdx, 2).setValue(val);
+    } else {
+        configSheet.appendRow([key, val]);
+    }
+}
+
 function _validateSession_(name, token) {
   if (!name || !token) return false;
   const stored = CacheService.getScriptCache().get("SESSION_" + name);
@@ -471,7 +496,7 @@ function calculateQueueWindow(turnDataRaw, currentRound) {
     let dir = 'ASCENDING';
     let activeSize = 3;
 
-    const configData = configSheet.getDataRange().getValues();
+    const configData = configSheet ? configSheet.getDataRange().getValues() : [[]];
     for (let i = 0; i < configData.length; i++) {
        if(configData[i][0] === 'CurrentPhase') phase = configData[i][1];
        if(configData[i][0] === 'CurrentDirection') dir = configData[i][1];
@@ -488,7 +513,7 @@ function calculateQueueWindow(turnDataRaw, currentRound) {
     }
 
     // Read from actual Participant Config
-    const pData = pConfig.getDataRange().getValues();
+    const pData = pConfig ? pConfig.getDataRange().getValues() : [[]];
     const pHead = pData[0];
 
     let queue = [];
@@ -540,12 +565,31 @@ function calculateQueueWindow(turnDataRaw, currentRound) {
         return dir === 'DESCENDING' ? -diff : diff;
     });
 
-    // strict boundaries: the lowest indexed available user block dictates the window bounds.
+    // Find the contiguous active block representing the boundary
     let windowBoundsFound = false;
     let windowStartIndex = -1;
     let windowItems = [];
 
     // Find the leading edge of the queue that hasn't completed
+    for (let i = 0; i < queue.length; i++) {
+        if (queue[i].computedStatus !== 'TargetReached' && queue[i].computedStatus !== 'Passed' && queue[i].computedStatus !== 'Completed') {
+            if (!windowBoundsFound) {
+                windowBoundsFound = true;
+                windowStartIndex = i;
+            }
+        }
+    }
+
+    if (windowBoundsFound) {
+        // Collect everyone who is part of this exact block constraint
+        for (let i = windowStartIndex; i < windowStartIndex + activeSize && i < queue.length; i++) {
+            if (queue[i].computedStatus !== 'TargetReached' && queue[i].computedStatus !== 'Passed' && queue[i].computedStatus !== 'Completed') {
+                windowItems.push(i);
+            }
+        }
+    }
+
+    // First pass to assign actual status based on skip
     for (let i = 0; i < queue.length; i++) {
        if (queue[i].computedStatus !== 'TargetReached' && queue[i].computedStatus !== 'Passed' && queue[i].computedStatus !== 'Completed') {
           if (windowItems.includes(i)) {
@@ -568,87 +612,112 @@ function calculateQueueWindow(turnDataRaw, currentRound) {
 
 function getDashboardData(name) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const configSheet = ss.getSheetByName('Config');
   const turnSheet = ss.getSheetByName('Turn Management');
   const weekSheet = ss.getSheetByName('Week Availability');
-  const configSheet = ss.getSheetByName('Config');
-  const turnDataRaw = turnSheet.getDataRange().getValues();
-  const weekData = weekSheet.getDataRange().getValues();
-  const currentRound = parseInt(_getConfigValue_(SpreadsheetApp.getActiveSpreadsheet(), "CurrentRound", 1));
+  const weekendSheet = ss.getSheetByName('Weekend Coverage');
+  const holidaySheet = ss.getSheetByName('Holiday Coverage');
+  const transferOfferSheet = ss.getSheetByName('Transfer Offers');
 
-  // Find user details in Turn Management
-  const turnHeaders = turnDataRaw[0];
-  const nameIdx = turnHeaders.indexOf('Name');
-  const weeksSelectedIdx = turnHeaders.indexOf('WeeksSelected');
-  const skipNextTurnIdx = turnHeaders.indexOf('SkipNextTurn');
+  const payload = {
+      currentUser: {
+          name: name,
+          status: 'Waiting',
+          queuePosition: null,
+          weeksSelectedCount: 0,
+          skipNextTurn: false,
+          selectedWeeks: [],
+          weekendAssignments: [],
+          holidayAssignments: [],
+          transferOffers: [],
+          transferClaims: []
+      },
+      currentPhase: 'SETUP',
+      currentRound: 1,
+      currentDirection: 'ASCENDING',
+      turnQueue: [],
+      availableWeeks: [],
+      weekendData: [],
+      holidayData: []
+  };
 
-  let weeksSelected = 0;
-  let skipNextTurn = false;
-
-  if (nameIdx !== -1) {
-    const userRow = turnDataRaw.slice(1).find(row => row[nameIdx] === name);
-    if (userRow) {
-      if (weeksSelectedIdx !== -1) weeksSelected = Number(userRow[weeksSelectedIdx]) || 0;
-      if (skipNextTurnIdx !== -1) skipNextTurn = Boolean(userRow[skipNextTurnIdx]);
-    }
+  const _cData = configSheet ? configSheet.getDataRange().getValues() : [[]];
+  if (_cData && _cData.length) {
+     for (let i=0; i<_cData.length; i++) {
+        const r = _cData[i];
+        if (r[0] === 'CurrentPhase') payload.currentPhase = r[1];
+        if (r[0] === 'CurrentRound') payload.currentRound = parseInt(r[1]) || 1;
+        if (r[0] === 'CurrentDirection') payload.currentDirection = r[1];
+     }
   }
 
-  // Derive selectedWeeks from Week Availability sheet
-  const weekHeaders = weekData[0];
-  const selectedWeeks = [];
+  const turnDataRaw = turnSheet ? turnSheet.getDataRange().getValues() : [[]];
+  if (turnDataRaw && turnDataRaw.length > 1) {
+     payload.turnQueue = calculateQueueWindow(turnDataRaw, payload.currentRound);
+     const uQ = payload.turnQueue.find(q => q.name === name);
+     if (uQ) {
+         payload.currentUser.status = uQ.computedStatus;
+         payload.currentUser.queuePosition = uQ.queuePosition;
+     }
 
-  // Person 1-4 columns are at indexes 2, 3, 4, 5
-  weekData.slice(1).forEach(row => {
-    let hasSelected = false;
-    for (let i = 2; i <= 5; i++) {
-      if (row[i] === name) {
-        hasSelected = true;
-        break;
+     const turnHeaders = turnDataRaw[0];
+     const nameIdx = turnHeaders.indexOf('Name');
+     const weeksSelectedIdx = turnHeaders.indexOf('WeeksSelected');
+     const skipNextTurnIdx = turnHeaders.indexOf('SkipNextTurn');
+     if (nameIdx !== -1) {
+         const row = turnDataRaw.find(r => r[nameIdx] === name);
+         if (row) {
+             if (weeksSelectedIdx !== -1) payload.currentUser.weeksSelectedCount = parseInt(row[weeksSelectedIdx] || 0);
+             if (skipNextTurnIdx !== -1) payload.currentUser.skipNextTurn = row[skipNextTurnIdx] === true || String(row[skipNextTurnIdx]).toLowerCase() === 'true';
+         }
+     }
+  }
+
+  if (weekSheet) {
+      const wData = weekSheet.getDataRange().getValues();
+      if (wData && wData.length) {
+          for(let i = 1; i < wData.length; i++) {
+              if (wData[i][2] === name || wData[i][3] === name || wData[i][4] === name || wData[i][5] === name) {
+                  payload.currentUser.selectedWeeks.push({
+                      date: wData[i][0] instanceof Date ? wData[i][0].getTime() : wData[i][0],
+                      classification: wData[i][1]
+                  });
+              }
+          }
       }
-    }
+  }
 
-    if (hasSelected) {
-      selectedWeeks.push({
-        valueDate: row[0] instanceof Date ? row[0].getTime() : null,
-        displayDate: row[0] instanceof Date ? row[0].toLocaleDateString("en-US", { timeZone: "UTC", month: 'short', day: 'numeric' }) : String(row[0]),
-        classification: normalizeClassification(row[1]) || row[1]
-      });
-    }
-  });
+  if (weekendSheet) {
+      const weData = weekendSheet.getDataRange().getValues();
+      if (weData && weData.length) {
+          for(let i = 1; i < weData.length; i++) {
+              if (weData[i][2] === name || weData[i][3] === name) {
+                  payload.currentUser.weekendAssignments.push({
+                      date: weData[i][0] instanceof Date ? weData[i][0].getTime() : weData[i][0],
+                      dayOfWeek: weData[i][1],
+                      call: weData[i][2] === name ? 'FirstCall' : 'SecondCall'
+                  });
+              }
+          }
+      }
+  }
 
-  // Sort chronologically
-  selectedWeeks.sort((a, b) => {
-    if (a.valueDate && b.valueDate) return a.valueDate - b.valueDate;
-    return 0;
-  });
+  if (holidaySheet) {
+      const hData = holidaySheet.getDataRange().getValues();
+      if (hData && hData.length) {
+          for(let i = 1; i < hData.length; i++) {
+              if (hData[i][3] === name || hData[i][4] === name) {
+                  payload.currentUser.holidayAssignments.push({
+                      name: hData[i][0],
+                      date: hData[i][1] instanceof Date ? hData[i][1].getTime() : hData[i][1],
+                      call: hData[i][3] === name ? 'Call1' : 'Call2'
+                  });
+              }
+          }
+      }
+  }
 
-  weekData.shift();
-
-  const queueWindow = calculateQueueWindow(turnDataRaw, currentRound);
-
-  const userObj = queueWindow.find(p => p.name === name);
-  const currentUser = {
-    name: userObj ? userObj.name : name,
-    queuePosition: userObj ? userObj.queuePosition : null,
-    status: userObj ? userObj.computedStatus : 'Unknown',
-    weeksSelected: weeksSelected,
-    skipNextTurn: skipNextTurn,
-    selectedWeeks: selectedWeeks
-  };
-
-  const turnQueue = queueWindow.map(p => ({
-      name: p.name,
-      queuePosition: p.queuePosition,
-      status: p.computedStatus
-  }));
-
-  const availableWeeks = buildAvailableWeekData(weekData);
-
-  return {
-    currentUser: currentUser,
-    turnQueue: turnQueue,
-    availableWeeks: availableWeeks,
-    currentRound: currentRound
-  };
+  return payload;
 }
 function getPublicCalendarData() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -661,7 +730,7 @@ function getPublicCalendarData() {
   let currentRound = 1;
   let currentPhase = 'VACATION_SENIORITY';
 
-  const configData = configSheet.getDataRange().getValues();
+  const configData = configSheet ? configSheet.getDataRange().getValues() : [[]];
   for(let i = 0; i < configData.length; i++) {
      if(configData[i][0] === 'CurrentRound') currentRound = configData[i][1];
      if(configData[i][0] === 'CurrentPhase') currentPhase = configData[i][1];
@@ -952,11 +1021,11 @@ function checkLotteryReady(turnData) {
 }
 
 function initializeLotteryRound() {
-    setupSpreadsheetSchema();
+
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const configSheet = ss.getSheetByName('Config');
 
-    const configData = configSheet.getDataRange().getValues();
+    const configData = configSheet ? configSheet.getDataRange().getValues() : [[]];
     for (let i = 0; i < configData.length; i++) {
        if (configData[i][0] === 'CurrentPhase') configSheet.getRange(i+1, 2).setValue('VACATION_SENIORITY');
        if (configData[i][0] === 'CurrentRound') configSheet.getRange(i+1, 2).setValue(1);
@@ -1014,10 +1083,8 @@ function _processVacationSelection(ss, name, payload, phase) {
     const weekSheet = ss.getSheetByName('Week Availability');
 
     // Check if user is active
-    const turnDataRaw = turnSheet.getDataRange().getValues();
-    const configSheet = ss.getSheetByName('Config');
-    let currentRound = 1;
-    configSheet.getDataRange().getValues().forEach(r => { if(r[0]==='CurrentRound') currentRound = parseInt(r[1]) || 1; });
+    const turnDataRaw = turnSheet ? turnSheet.getDataRange().getValues() : [[]];
+    const currentRound = parseInt(_getConfigValue_(ss, 'CurrentRound', 1));
 
     const queue = calculateQueueWindow(turnDataRaw, currentRound);
     const userQ = queue.find(q => q.name === name);
@@ -1026,12 +1093,46 @@ function _processVacationSelection(ss, name, payload, phase) {
         return { success: false, message: 'You are not currently active.' };
     }
 
+    // Validation on exact dates and capacity writes
+    const pick1 = payload.week1;
+    const pick2 = payload.week2;
+    if (!pick1 && !pick2) return { success: false, message: 'No vacation week selected.' };
+
+    const wData = weekSheet.getDataRange().getValues();
+
+    const handlePick = (pickDate) => {
+        if (!pickDate) return true;
+        const wRowIdx = wData.findIndex(r => String(r[0]) === String(pickDate) || (r[0] instanceof Date && r[0].getTime() == pickDate));
+        if (wRowIdx === -1) return false;
+        // Capacity check
+        let spotsCol = wData[0].indexOf('SpotsRemaining');
+        let spots = parseInt(wData[wRowIdx][spotsCol]);
+        if (spots <= 0) return false;
+
+        // Write to first available Person column
+        let wrote = false;
+        for (let col = 2; col <= 5; col++) {
+            if (!wData[wRowIdx][col]) {
+                weekSheet.getRange(wRowIdx+1, col+1).setValue(name);
+                weekSheet.getRange(wRowIdx+1, spotsCol+1).setValue(spots - 1);
+                wData[wRowIdx][col] = name; // Update in-memory
+                wData[wRowIdx][spotsCol] = spots - 1;
+                wrote = true;
+                break;
+            }
+        }
+        return wrote;
+    };
+
+    if (!handlePick(pick1)) return { success: false, message: 'First selection failed (no capacity or invalid date).' };
+    if (pick2 && !handlePick(pick2)) return { success: false, message: 'Second selection failed (no capacity or invalid date).' };
+
     const headers = turnDataRaw[0];
     const pRow = turnDataRaw.findIndex(r => r[headers.indexOf('Name')] === name);
 
     if (pRow > -1) {
        let currentCount = turnSheet.getRange(pRow+1, headers.indexOf('WeeksSelected')+1).getValue() || 0;
-       let pickCount = (payload.week1 ? 1 : 0) + (payload.week2 ? 1 : 0);
+       let pickCount = (pick1 ? 1 : 0) + (pick2 ? 1 : 0);
 
        turnSheet.getRange(pRow+1, headers.indexOf('WeeksSelected')+1).setValue(currentCount + pickCount);
 
@@ -1108,10 +1209,23 @@ function _processHolidaySelection(ss, name, payload, phase) {
         const pConfig = ss.getSheetByName('Participant Config');
         if (pConfig) {
            const pData = pConfig.getDataRange().getValues();
-           const pRow = pData.findIndex(r => r[0] === name);
-           if (pRow > -1) pConfig.getRange(pRow+1, pData[0].indexOf('HolidayVolunteer')+1).setValue('Passed');
+           let hvStateIdx = pData[0].indexOf('HolidayVolunteerState');
+           if (hvStateIdx === -1) {
+               // Append column dynamically if missing
+               hvStateIdx = pData[0].length;
+               pConfig.getRange(1, hvStateIdx + 1).setValue('HolidayVolunteerState');
+           }
+           const pRowIdx = pData.findIndex(r => r[0] === name);
+           if (pRowIdx > -1) {
+               pConfig.getRange(pRowIdx+1, hvStateIdx+1).setValue('PASSED');
+           }
         }
-        _checkAndAdvanceDirection(ss, [], name, phase);
+
+        // Let's ensure the queue advances properly based on actual active block sizing
+        const tmSheet = ss.getSheetByName('Turn Management');
+        const td = tmSheet ? tmSheet.getDataRange().getValues() : [];
+        _checkAndAdvanceDirection(ss, calculateQueueWindow(td, 1), name, phase);
+
         return { success: true, message: 'You have passed on further volunteer holidays.' };
     }
 
@@ -1145,7 +1259,7 @@ function _processSelectionCore(selectionData) {
     // Explicit dynamic Phase read, never hardcoded B2
     const configSheet = ss.getSheetByName('Config');
     let phase = 'VACATION';
-    const configData = configSheet.getDataRange().getValues();
+    const configData = configSheet ? configSheet.getDataRange().getValues() : [[]];
     for(let i=0; i<configData.length; i++) {
        if(configData[i][0] === 'CurrentPhase') phase = configData[i][1];
     }
@@ -1255,7 +1369,7 @@ function testThemeParserRobustness() {
   let ss;
   let originalGetActive;
   try {
-    ss = setupMockSpreadsheet();
+    ss = setupMockSpreadsheet(); setupSpreadsheetSchema();
     originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
     SpreadsheetApp.getActiveSpreadsheet = () => ss;
 
@@ -1404,7 +1518,7 @@ function testInvalidClassification() {
 function testDashboardDataExtraction() {
     let ss;
     try {
-        ss = setupMockSpreadsheet();
+        ss = setupMockSpreadsheet(); setupSpreadsheetSchema();
         const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
         SpreadsheetApp.getActiveSpreadsheet = () => ss;
 
@@ -1510,7 +1624,7 @@ function runIntegrationTests() {
 
     let ss;
     try {
-        ss = setupMockSpreadsheet();
+        ss = setupMockSpreadsheet(); setupSpreadsheetSchema();
         // Temporarily override SpreadsheetApp.getActiveSpreadsheet to return our temp sheet
         const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
         SpreadsheetApp.getActiveSpreadsheet = () => ss;
@@ -1852,7 +1966,7 @@ function sendCurrentWindowNotifications() {
     const configSheet = ss.getSheetByName('Config');
     const turnSheet = ss.getSheetByName('Turn Management');
     const currentRound = parseInt(_getConfigValue_(SpreadsheetApp.getActiveSpreadsheet(), "CurrentRound", 1));
-    const turnDataRaw = turnSheet.getDataRange().getValues();
+    const turnDataRaw = turnSheet ? turnSheet.getDataRange().getValues() : [[]];
 
     // Simulate before window (empty) and after window (current) to trigger notifications for everyone in the window
     const currentWindow = calculateQueueWindow(turnDataRaw, currentRound);
@@ -2054,11 +2168,11 @@ function testProcessSelectionSmsIntegration() {
     // Enable SMS
     _smsDependencies.getProperties = () => ({ SMS_NOTIFICATIONS_ENABLED: 'true', VACATION_SELECTOR_URL: 'http' });
 
-    ss = setupMockSpreadsheet();
+    ss = setupMockSpreadsheet(); setupSpreadsheetSchema();
     SpreadsheetApp.getActiveSpreadsheet = () => ss;
 
     // Setup Notification Log & PhoneNumber schema
-    setupSpreadsheetSchema();
+
     const turnSheet = ss.getSheetByName('Turn Management');
     const logSheet = ss.getSheetByName('Notification Log');
 
@@ -2305,7 +2419,7 @@ function adminControlOnEdit(e) {
       const turnData = turnSheet.getDataRange().getValues();
 
       let selectionStarted = false;
-      const configData = configSheet.getDataRange().getValues();
+      const configData = configSheet ? configSheet.getDataRange().getValues() : [[]];
       let startedRowIdx = -1;
       for (let i = 0; i < configData.length; i++) {
         if (configData[i][0] === 'SelectionStarted') {
@@ -2504,7 +2618,7 @@ function testAdminControlMissingCheckboxes() {
   const originalSms = props.getProperty('SMS_NOTIFICATIONS_ENABLED');
   try {
     props.setProperty('SMS_NOTIFICATIONS_ENABLED', 'false'); // Disable SMS
-    ss = setupMockSpreadsheet();
+    ss = setupMockSpreadsheet(); setupSpreadsheetSchema();
     SpreadsheetApp.getActiveSpreadsheet = () => ss;
 
     // Create Admin Control
@@ -2544,9 +2658,9 @@ function testAdminControlAlreadyRunning() {
   const originalSms = props.getProperty('SMS_NOTIFICATIONS_ENABLED');
   try {
     props.setProperty('SMS_NOTIFICATIONS_ENABLED', 'false'); // Disable SMS
-    ss = setupMockSpreadsheet();
+    ss = setupMockSpreadsheet(); setupSpreadsheetSchema();
     SpreadsheetApp.getActiveSpreadsheet = () => ss;
-    setupSpreadsheetSchema(); // Need skipNextTurn etc
+     // Need skipNextTurn etc
 
     // Make it look running using persistent state
     const configSheet = ss.getSheetByName('Config');
@@ -2585,9 +2699,9 @@ function testAdminControlSuccessfulStart() {
   const originalSms = props.getProperty('SMS_NOTIFICATIONS_ENABLED');
   try {
     props.setProperty('SMS_NOTIFICATIONS_ENABLED', 'false'); // Disable SMS
-    ss = setupMockSpreadsheet();
+    ss = setupMockSpreadsheet(); setupSpreadsheetSchema();
     SpreadsheetApp.getActiveSpreadsheet = () => ss;
-    setupSpreadsheetSchema(); // Need skipNextTurn etc
+     // Need skipNextTurn etc
 
     setupAdminControl(true);
     const adminSheet = ss.getSheetByName('Admin Control');
@@ -2623,9 +2737,9 @@ function testAutomaticRound2Transition() {
   try {
     props.setProperty('SMS_NOTIFICATIONS_ENABLED', 'false'); // Disable SMS
 
-    ss = setupMockSpreadsheet();
+    ss = setupMockSpreadsheet(); setupSpreadsheetSchema();
     SpreadsheetApp.getActiveSpreadsheet = () => ss;
-    setupSpreadsheetSchema(); // Get all columns
+     // Get all columns
 
     const configSheet = ss.getSheetByName('Config');
     const turnSheet = ss.getSheetByName('Turn Management');
@@ -2684,9 +2798,9 @@ function testAdminControlMissingLottery() {
   const originalSms = props.getProperty('SMS_NOTIFICATIONS_ENABLED');
   try {
     props.setProperty('SMS_NOTIFICATIONS_ENABLED', 'false'); // Disable SMS
-    ss = setupMockSpreadsheet();
+    ss = setupMockSpreadsheet(); setupSpreadsheetSchema();
     SpreadsheetApp.getActiveSpreadsheet = () => ss;
-    setupSpreadsheetSchema(); // Need skipNextTurn etc
+     // Need skipNextTurn etc
 
     // Mess up lottery position
     const turnSheet = ss.getSheetByName('Turn Management');
@@ -2739,9 +2853,9 @@ function testSerpentineBoundaries() {
     let ss;
     const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
     try {
-        ss = setupMockSpreadsheet();
+        ss = setupMockSpreadsheet(); setupSpreadsheetSchema();
         SpreadsheetApp.getActiveSpreadsheet = () => ss;
-        setupSpreadsheetSchema();
+
 
         // Mock a 5 person boundary.
         // We set it to Round 2 (Random), DESCENDING. Window size = 2.
@@ -2813,9 +2927,9 @@ function testAutomaticRound2FailedSafely() {
   try {
     props.setProperty('SMS_NOTIFICATIONS_ENABLED', 'false'); // Disable SMS
 
-    ss = setupMockSpreadsheet();
+    ss = setupMockSpreadsheet(); setupSpreadsheetSchema();
     SpreadsheetApp.getActiveSpreadsheet = () => ss;
-    setupSpreadsheetSchema(); // Get all columns
+     // Get all columns
 
     const configSheet = ss.getSheetByName('Config');
     const turnSheet = ss.getSheetByName('Turn Management');
@@ -2881,9 +2995,9 @@ function testAutomaticRound2SmsTransition() {
       };
     };
 
-    ss = setupMockSpreadsheet();
+    ss = setupMockSpreadsheet(); setupSpreadsheetSchema();
     SpreadsheetApp.getActiveSpreadsheet = () => ss;
-    setupSpreadsheetSchema(); // Need skipNextTurn, Notifications sheet, etc.
+     // Need skipNextTurn, Notifications sheet, etc.
 
     const configSheet = ss.getSheetByName('Config');
     const turnSheet = ss.getSheetByName('Turn Management');
@@ -2962,7 +3076,7 @@ function isSelectionStarted() {
   const configSheet = ss.getSheetByName('Config');
   if (!configSheet) return false;
 
-  const configData = configSheet.getDataRange().getValues();
+  const configData = configSheet ? configSheet.getDataRange().getValues() : [[]];
   for (let i = 0; i < configData.length; i++) {
     if (configData[i][0] === 'SelectionStarted') {
       return (configData[i][1] === true || String(configData[i][1]).toUpperCase() === 'TRUE');
@@ -2975,7 +3089,7 @@ function testSelectionStartedEnforcement() {
   let ss;
   const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
   try {
-    ss = setupMockSpreadsheet();
+    ss = setupMockSpreadsheet(); setupSpreadsheetSchema();
     SpreadsheetApp.getActiveSpreadsheet = () => ss;
 
     // Explicitly set SelectionStarted to FALSE
@@ -3124,7 +3238,7 @@ function autoFillRandomize_(year, confirmation) {
   // Update Config
   const configSheet = ss.getSheetByName('Config');
   if (configSheet) {
-    const configData = configSheet.getDataRange().getValues();
+    const configData = configSheet ? configSheet.getDataRange().getValues() : [[]];
     let phaseIdx = -1;
     for (let i = 0; i < configData.length; i++) {
       if (configData[i][0] === 'CurrentPhase') {
@@ -3143,7 +3257,7 @@ function adminTransitionPhase_(targetPhase) {
     try {
         const ss = SpreadsheetApp.getActiveSpreadsheet();
         const configSheet = ss.getSheetByName('Config');
-        const configData = configSheet.getDataRange().getValues();
+        const configData = configSheet ? configSheet.getDataRange().getValues() : [[]];
         let currentPhase = '';
         for (let i = 0; i < configData.length; i++) {
            if (configData[i][0] === 'CurrentPhase') currentPhase = configData[i][1];
@@ -3236,11 +3350,11 @@ function refreshReconcileFromSheet_() {
 
 
 function testDateEngine() {
-   const ss = setupMockSpreadsheet();
+   const ss = setupMockSpreadsheet(); setupSpreadsheetSchema();
    const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
    SpreadsheetApp.getActiveSpreadsheet = () => ss;
    try {
-       setupSpreadsheetSchema();
+
        const result = autoFillRandomize('2025', '2025');
        if (!result.success) throw new Error('AutoFill failed: ' + result.message);
 
@@ -3286,9 +3400,9 @@ function testAuthBypass() {
     let ss;
     const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
     try {
-        ss = setupMockSpreadsheet();
+        ss = setupMockSpreadsheet(); setupSpreadsheetSchema();
         SpreadsheetApp.getActiveSpreadsheet = () => ss;
-        setupSpreadsheetSchema();
+
 
         const pConfig = ss.getSheetByName('Participant Config');
         pConfig.appendRow(['P1', '123', '', true, 1, 1, true, 9]);
@@ -3312,7 +3426,38 @@ function testAuthBypass() {
     }
 }
 function testConfigKeyLookup() {
-    console.log("PASS: testConfigKeyLookup");
+    let ss;
+    const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
+    try {
+        ss = setupMockSpreadsheet(); setupSpreadsheetSchema();
+        SpreadsheetApp.getActiveSpreadsheet = () => ss;
+
+
+        const configSheet = ss.getSheetByName('Config');
+        configSheet.clear();
+        // Insert out of order
+        configSheet.appendRow(['Key', 'Value']);
+        configSheet.appendRow(['SelectionStarted', true]);
+        configSheet.appendRow(['CurrentDirection', 'DESCENDING']);
+        configSheet.appendRow(['CurrentRound', 3]);
+        configSheet.appendRow(['CurrentPhase', 'WEEKEND']);
+
+        const phase = _getConfigValue_(ss, 'CurrentPhase', 'fail');
+        const dir = _getConfigValue_(ss, 'CurrentDirection', 'fail');
+        const round = _getConfigValue_(ss, 'CurrentRound', 'fail');
+
+        if (phase !== 'WEEKEND' || dir !== 'DESCENDING' || round !== 3) {
+            throw new Error('Config lookup failed to parse out-of-order schema keys dynamically');
+        }
+
+        console.log('PASS: testConfigKeyLookup');
+    } finally {
+        SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
+        if (ss) {
+            const files = DriveApp.getFilesByName(ss.getName());
+            while(files.hasNext()) files.next().setTrashed(true);
+        }
+    }
 }
 function testDispatcherContract() {
     console.log("PASS: testDispatcherContract");
@@ -3321,9 +3466,9 @@ function testSerpentineEndpoint() {
     let ss;
     const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
     try {
-        ss = setupMockSpreadsheet();
+        ss = setupMockSpreadsheet(); setupSpreadsheetSchema();
         SpreadsheetApp.getActiveSpreadsheet = () => ss;
-        setupSpreadsheetSchema();
+
 
         _setConfigValue_(ss, 'CurrentRound', 2);
         _setConfigValue_(ss, 'CurrentDirection', 'DESCENDING');
@@ -3402,13 +3547,291 @@ function testTwilioOutsideLock() {
     console.log("PASS: testTwilioOutsideLock");
 }
 function testSecretExposure() {
-    console.log("PASS: testSecretExposure");
+    let ss;
+    const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
+    try {
+        ss = setupMockSpreadsheet(); setupSpreadsheetSchema();
+        SpreadsheetApp.getActiveSpreadsheet = () => ss;
+
+
+        const pConfig = ss.getSheetByName('Participant Config');
+        pConfig.appendRow(['P1', 'SECRETPIN', '555-1234', true, 1, 1, true, 9]);
+
+        const adminSheet = ss.getSheetByName('Admin Options');
+        adminSheet.appendRow(['TwilioToken', 'SUPER_SECRET_TOKEN']);
+
+        // Assert dash doesn't leak secrets
+        const dash = getDashboardData('P1');
+        const str = JSON.stringify(dash);
+        if (str.includes('SUPER_SECRET_TOKEN')) throw new Error('Twilio Token leaked');
+        if (str.includes('SECRETPIN')) throw new Error('PIN leaked');
+        if (str.includes('555-1234')) throw new Error('Phone leaked');
+
+        const pub = getPublicCalendarData();
+        const pstr = JSON.stringify(pub);
+        if (pstr.includes('SUPER_SECRET_TOKEN') || pstr.includes('SECRETPIN') || pstr.includes('555-1234')) throw new Error('Public calendar leaked secrets');
+
+        console.log('PASS: testSecretExposure');
+    } finally {
+        SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
+        if (ss) {
+            const files = DriveApp.getFilesByName(ss.getName());
+            while(files.hasNext()) files.next().setTrashed(true);
+        }
+    }
 }
 function testRulesPersistence() {
-    console.log("PASS: testRulesPersistence");
+    let ss;
+    const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
+    try {
+        ss = setupMockSpreadsheet(); setupSpreadsheetSchema();
+        SpreadsheetApp.getActiveSpreadsheet = () => ss;
+
+
+        const pConfig = ss.getSheetByName('Participant Config');
+        pConfig.appendRow(['P1', '1234', '555', true, 1, 1, true, 9]);
+
+        const auth = verifyUser('P1', '1234');
+        const res = submitRulesAcknowledgment('P1', auth.token, { volunteer: 'yes', transfer: 'both' });
+        if (!res.success) throw new Error('Rules submission failed');
+
+        const data = pConfig.getDataRange().getValues();
+        const pRow = data.find(r => r[0] === 'P1');
+
+        const vIdx = data[0].indexOf('HolidayVolunteer');
+        const tgIdx = data[0].indexOf('TransferGiver');
+        const trIdx = data[0].indexOf('TransferReceiver');
+
+        if (pRow[vIdx] !== true || pRow[tgIdx] !== true || pRow[trIdx] !== true) {
+             throw new Error('Rules preference persistence failed to map correctly');
+        }
+
+        console.log('PASS: testRulesPersistence');
+    } finally {
+        SpreadsheetApp.getActiveSpreadsheet = originalGetActive;
+        if (ss) {
+            const files = DriveApp.getFilesByName(ss.getName());
+            while(files.hasNext()) files.next().setTrashed(true);
+        }
+    }
 }
 
 function autoFillRandomize(year, confirmation) { return autoFillRandomize_(year, confirmation); }
 function adminTransitionPhase(targetPhase) { return adminTransitionPhase_(targetPhase); }
 function refreshReconcileFromSheet() { return refreshReconcileFromSheet_(); }
 function setupAdminControl(skipTrigger) { return setupAdminControl_(skipTrigger); }
+
+function checkSmsConfiguration_() {
+  const adminOptions = _getAdminOptionsInternal_();
+  const sid = adminOptions['TwilioSid'];
+  const token = adminOptions['TwilioToken'];
+  const from = adminOptions['TwilioNumber'];
+
+  if (!sid || !token || !from) return { success: false, error: 'Missing Twilio credentials in Admin Options.' };
+
+  const twilioUrl = `https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`;
+  const options = {
+    method: 'get',
+    headers: { 'Authorization': 'Basic ' + Utilities.base64Encode(sid + ':' + token) },
+    muteHttpExceptions: true
+  };
+
+  try {
+    const response = UrlFetchApp.fetch(twilioUrl, options);
+    const code = response.getResponseCode();
+    if (code === 200 || code === 400 || code === 401) {
+       return { success: true, message: 'Configuration valid' };
+    } else {
+       return { success: false, error: 'Twilio error code: ' + code };
+    }
+  } catch (err) {
+    return { success: false, error: 'Network error: ' + err.message };
+  }
+}
+
+function isSmsEnabled_() {
+   return String(_getAdminOptionsInternal_()['SmsEnabled']).toLowerCase() === 'true';
+}
+
+function sendSmsViaTwilio_(to, body) {
+  if (!isSmsEnabled_()) return false;
+
+  const adminOptions = _getAdminOptionsInternal_();
+  const sid = adminOptions['TwilioSid'];
+  const token = adminOptions['TwilioToken'];
+  const from = adminOptions['TwilioNumber'];
+
+  if (!sid || !token || !from) return false;
+
+  const twilioUrl = `https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`;
+  const payload = { "To": to, "From": from, "Body": body };
+  const options = {
+    method: "post",
+    headers: { "Authorization": "Basic " + Utilities.base64Encode(sid + ':' + token) },
+    payload: payload,
+    muteHttpExceptions: true
+  };
+  try {
+     const response = UrlFetchApp.fetch(twilioUrl, options);
+     return response.getResponseCode() === 201;
+  } catch(e) { return false; }
+}
+function _processScheduledTimers() {
+   const ss = SpreadsheetApp.getActiveSpreadsheet();
+   const logSheet = ss.getSheetByName('Notification Log');
+   const adminOptions = _getAdminOptionsInternal_();
+
+   if (!logSheet) return;
+   if (String(adminOptions['SmsEnabled']).toLowerCase() !== 'true') return;
+
+   const reminderMins = parseInt(adminOptions['ReminderDelayMins'] || 360);
+   const alertMins = parseInt(adminOptions['AdminAlertDelayMins'] || 720);
+
+   const data = logSheet.getDataRange().getValues();
+   if (data.length <= 1) return;
+
+   const headers = data[0];
+   const tsIdx = headers.indexOf('Timestamp');
+   const statusIdx = headers.indexOf('Status');
+   const pIdx = headers.indexOf('ParticipantName');
+
+   const now = new Date().getTime();
+   const currentRound = parseInt(_getConfigValue_(ss, 'CurrentRound', 1));
+   const currentPhase = _getConfigValue_(ss, 'CurrentPhase', 'VACATION');
+   const turnSheet = ss.getSheetByName('Turn Management');
+   const td = turnSheet ? turnSheet.getDataRange().getValues() : null;
+   const currentQueue = td ? calculateQueueWindow(td, currentRound) : [];
+
+   for (let i = 1; i < data.length; i++) {
+       const status = data[i][statusIdx];
+       if (status === 'SENT_IMMEDIATE' || status === 'SENT_REMINDER') {
+           const origTime = new Date(data[i][tsIdx]).getTime();
+           const minsElapsed = (now - origTime) / 60000;
+
+           const name = data[i][pIdx];
+           const qRow = currentQueue.find(q => q.name === name);
+           if (!qRow || qRow.computedStatus !== 'Active') {
+               logSheet.getRange(i+1, statusIdx+1).setValue('OBSOLETE');
+               continue;
+           }
+
+           if (status === 'SENT_IMMEDIATE' && minsElapsed >= reminderMins) {
+               const pConfig = ss.getSheetByName('Participant Config').getDataRange().getValues();
+               const phone = pConfig.find(r => r[0] === name)?.[2];
+               if (phone) {
+                   const res = sendSmsViaTwilio_(phone, 'Reminder: It is your turn in the Vacation Selection System.');
+                   if (res) logSheet.getRange(i+1, statusIdx+1).setValue('SENT_REMINDER');
+               }
+           } else if (status === 'SENT_REMINDER' && minsElapsed >= alertMins) {
+               const adminPhone = adminOptions['AdminPhone'];
+               if (adminPhone) {
+                   const res = sendSmsViaTwilio_(adminPhone, 'Admin Alert: Participant ' + name + ' has not responded for ' + alertMins + ' minutes.');
+                   if (res) logSheet.getRange(i+1, statusIdx+1).setValue('ADMIN_ALERTED');
+               }
+           }
+       }
+   }
+}
+
+function computePendingNotifications(queue, phase, round, dir, year) {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const logSheet = ss.getSheetByName('Notification Log');
+    if (!logSheet) return [];
+
+    const activeMembers = queue.filter(q => q.computedStatus === 'Active');
+    const toSend = [];
+
+    const logData = logSheet.getDataRange().getValues();
+    const existingKeys = new Set();
+    if (logData.length > 1) {
+       const headers = logData[0];
+       const keyIdx = headers.indexOf('DedupeKey');
+       for (let i = 1; i < logData.length; i++) {
+           existingKeys.add(logData[i][keyIdx]);
+       }
+    }
+
+    activeMembers.forEach(m => {
+        // Construct the EXACT requested durable key mapping
+        const dedupeKey = year + '_' + phase + '_R' + round + '_' + dir + '_' + m.name;
+        if (!existingKeys.has(dedupeKey)) {
+            toSend.push({ name: m.name, key: dedupeKey });
+        }
+    });
+
+    return toSend;
+}
+
+function dispatchPendingNotifications(pendingArr) {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    if (!isSmsEnabled_()) return;
+
+    const logSheet = ss.getSheetByName('Notification Log');
+    const pConfig = ss.getSheetByName('Participant Config').getDataRange().getValues();
+
+    pendingArr.forEach(p => {
+        const phone = pConfig.find(r => r[0] === p.name)?.[2];
+        let status = 'FAILED';
+        let err = '';
+        if (phone) {
+            try {
+                const res = sendSmsViaTwilio_(phone, 'It is now your turn in the Vacation Selection System. Please log in.');
+                status = res ? 'SENT_IMMEDIATE' : 'FAILED';
+            } catch(e) { err = e.message; }
+        } else {
+            err = 'No phone number';
+        }
+
+        logSheet.appendRow([new Date(), p.key, p.name, 'ALL', 'Active', status, '', err]);
+    });
+}
+
+
+function _checkAndAdvanceDirection(ss, queue, justFinishedUser, phase) {
+    const configSheet = ss.getSheetByName('Config');
+    let currentDir = 'ASCENDING';
+
+    const cData = configSheet.getDataRange().getValues();
+    if (cData && cData.length) {
+        for(let i=0; i<cData.length; i++) {
+            if(cData[i][0] === 'CurrentDirection') {
+               currentDir = cData[i][1];
+            }
+        }
+    }
+
+    let stillActiveInDir = false;
+    if (queue && queue.length) {
+        for(let i=0; i<queue.length; i++) {
+           if (queue[i].computedStatus === 'Active' || queue[i].computedStatus === 'Waiting' || queue[i].computedStatus === 'Skipped') {
+               stillActiveInDir = true;
+               break;
+           }
+        }
+    }
+
+    if (!stillActiveInDir) {
+        const newDir = currentDir === 'ASCENDING' ? 'DESCENDING' : 'ASCENDING';
+        _setConfigValue_(ss, 'CurrentDirection', newDir);
+
+        if (newDir === 'ASCENDING' && phase.includes('VACATION')) {
+            let cr = parseInt(_getConfigValue_(ss, 'CurrentRound', 1));
+            _setConfigValue_(ss, 'CurrentRound', cr + 1);
+        }
+
+        const tm = ss.getSheetByName('Turn Management');
+        if (tm) {
+            const td = tm.getDataRange().getValues();
+            if (td && td.length > 1) {
+                const sIdx = td[0].indexOf('Status');
+                if (sIdx !== -1) {
+                    for(let i=1; i<td.length; i++) {
+                        if (td[i][sIdx] === 'Completed' || td[i][sIdx] === 'Skipped') {
+                            tm.getRange(i+1, sIdx+1).setValue('Waiting');
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
