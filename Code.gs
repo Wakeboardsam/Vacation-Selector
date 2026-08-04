@@ -3459,9 +3459,7 @@ function testConfigKeyLookup() {
         }
     }
 }
-function testDispatcherContract() {
-    console.log("PASS: testDispatcherContract");
-}
+function testDispatcherContract() { console.log("NOT RUN: testDispatcherContract"); }
 function testSerpentineEndpoint() {
     let ss;
     const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
@@ -3519,33 +3517,15 @@ function testSerpentineEndpoint() {
         }
     }
 }
-function testTwoNonPrimeSkip() {
-    console.log("PASS: testTwoNonPrimeSkip");
-}
-function testWeekendFourOutcome() {
-    console.log("PASS: testWeekendFourOutcome");
-}
-function testHolidayRules() {
-    console.log("PASS: testHolidayRules");
-}
-function testTransferConcurrency() {
-    console.log("PASS: testTransferConcurrency");
-}
-function testTransferOfferValidation() {
-    console.log("PASS: testTransferOfferValidation");
-}
-function testReconciliation() {
-    console.log("PASS: testReconciliation");
-}
-function testMigrationIdempotency() {
-    console.log("PASS: testMigrationIdempotency");
-}
-function testNotificationActivation() {
-    console.log("PASS: testNotificationActivation");
-}
-function testTwilioOutsideLock() {
-    console.log("PASS: testTwilioOutsideLock");
-}
+function testTwoNonPrimeSkip() { console.log("NOT RUN: testTwoNonPrimeSkip"); }
+function testWeekendFourOutcome() { console.log("NOT RUN: testWeekendFourOutcome"); }
+function testHolidayRules() { console.log("NOT RUN: testHolidayRules"); }
+function testTransferConcurrency() { console.log("NOT RUN: testTransferConcurrency"); }
+function testTransferOfferValidation() { console.log("NOT RUN: testTransferOfferValidation"); }
+function testReconciliation() { console.log("NOT RUN: testReconciliation"); }
+function testMigrationIdempotency() { console.log("NOT RUN: testMigrationIdempotency"); }
+function testNotificationActivation() { console.log("NOT RUN: testNotificationActivation"); }
+function testTwilioOutsideLock() { console.log("NOT RUN: testTwilioOutsideLock"); }
 function testSecretExposure() {
     let ss;
     const originalGetActive = SpreadsheetApp.getActiveSpreadsheet;
